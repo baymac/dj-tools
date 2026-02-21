@@ -31,14 +31,24 @@ class DJStudioMixExtractor:
         self.home = Path.home()
         self.db_path = self.home / "Music" / "DJ.Studio" / "Database"
         self.config_path = self.home / "Library" / "Application Support" / "DJ.Studio" / "config.json"
-        self.cache_path = self.home / "Music" / "DJ.Studio" / "Cache" / "Database" / "audio-library-table.json"
+        self.library_dir = self.db_path / "audio-library-table"
 
-        # Load audio library cache
+        # Load audio library from sharded directory structure:
+        # audio-library-table/{hash_prefix}/{library_key}
         self.audio_library = {}
-        if self.cache_path.exists():
-            with open(self.cache_path, 'r') as f:
-                library_data = json.load(f)
-                self.audio_library = {track['key']: track for track in library_data}
+        if self.library_dir.is_dir():
+            for shard in self.library_dir.iterdir():
+                if not shard.is_dir():
+                    continue
+                for entry in shard.iterdir():
+                    if not entry.is_file():
+                        continue
+                    try:
+                        with open(entry, 'r') as f:
+                            track = json.load(f)
+                            self.audio_library[track['key']] = track
+                    except Exception:
+                        continue
 
     def get_all_projects(self) -> List[Dict]:
         """Get list of all mix projects."""

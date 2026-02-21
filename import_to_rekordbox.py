@@ -2,22 +2,29 @@
 """
 DJ Studio to Rekordbox Importer (via pyrekordbox)
 
-Reads DJ Studio mix JSON (from get_mix_info.py) and writes directly into
-the rekordbox encrypted database — creating a playlist, adding tracks in
-order, and storing transition effect names on the tracks.
+Two-pass import pipeline:
+  Pass 1: Create tracks, playlist, and transition effects in rekordbox.
+  Pass 2: Write hot cue points snapped to rekordbox's analyzed beatgrid.
+
+Between passes, open rekordbox to analyze all tracks so ANLZ beatgrids
+are generated. Pass 2 reads the PQTZ tag and snaps cues to the nearest
+beat via binary search.
 
 Missing Beatport tracks are automatically created in the DB as streaming
 entries (FileType=20), matching the format rekordbox uses natively.
 
 Usage:
-    python3 import_to_rekordbox.py mix.json
-    python3 import_to_rekordbox.py mix.json --dry-run
+    python3 import_to_rekordbox.py mix.json                 Pass 1
+    python3 import_to_rekordbox.py mix.json --cues-only     Pass 2 (snapped)
+    python3 import_to_rekordbox.py mix.json --cues-only --no-snap  Pass 2 (unsnapped)
+    Add --dry-run to any command to preview without writing.
 
 Requirements:
     - pyrekordbox (pip install pyrekordbox)
     - Rekordbox must be CLOSED before running (for writes)
 """
 
+import bisect
 import json
 import sys
 import argparse
@@ -50,9 +57,12 @@ class RekordboxImporter:
     """Import DJ Studio mixes into rekordbox database."""
 
     MY_TAG_PARENT_ID = "4"  # "Untitled Column" for key tags
+    PREP_BARS = 8  # Number of bars before transition start for the prep cue
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(self, dry_run: bool = False, cues_only: bool = False, snap: bool = True):
         self.dry_run = dry_run
+        self.cues_only = cues_only
+        self.snap = snap
         # Always open DB (needed for reading/matching even in dry-run)
         self.db = Rekordbox6Database()
         # Cache lookups
@@ -246,19 +256,63 @@ class RekordboxImporter:
 
     @staticmethod
     def beats_to_ms(beat: float, bpm: float) -> int:
-        """Convert a beat position to milliseconds."""
+        """Convert a beat position to milliseconds, snapped to nearest whole beat.
+
+        DJ Studio's beat grid doesn't align with rekordbox's, so beat positions
+        may be fractional (e.g. 128.3 instead of 128). Rounding to the nearest
+        integer beat ensures cues land on exact beat boundaries in rekordbox,
+        even if the track hasn't been analysed yet.
+        """
         if bpm <= 0:
             return 0
-        return int(beat * 60000.0 / bpm)
+        return int(round(beat) * 60000.0 / bpm)
 
     @staticmethod
-    def get_prep_beats(duration_beats: int) -> int:
-        """Determine prep-cue distance (8, 16, or 32) based on transition length."""
-        if duration_beats >= 32:
-            return 32
-        if duration_beats >= 16:
-            return 16
-        return 8
+    def snap_to_beatgrid(ms: int, beat_times_ms: List[float]) -> int:
+        """Snap a millisecond position to the nearest beat in Rekordbox's grid."""
+        if not beat_times_ms:
+            return ms
+        idx = bisect.bisect_left(beat_times_ms, ms)
+        # Edge cases: before first or after last beat
+        if idx == 0:
+            return int(beat_times_ms[0])
+        if idx >= len(beat_times_ms):
+            return int(beat_times_ms[-1])
+        # Pick the closer of the two surrounding beats
+        before = beat_times_ms[idx - 1]
+        after = beat_times_ms[idx]
+        if (ms - before) <= (after - ms):
+            return int(before)
+        return int(after)
+
+    def snapped_beats_to_ms(self, beat: float, bpm: float, beat_times_ms: Optional[List[float]]) -> int:
+        """Convert beat to ms, optionally snapping to Rekordbox's analyzed beatgrid."""
+        raw_ms = self.beats_to_ms(beat, bpm)
+        if beat_times_ms is not None and self.snap:
+            return self.snap_to_beatgrid(raw_ms, beat_times_ms)
+        return raw_ms
+
+    def get_beatgrid(self, content: "tables.DjmdContent") -> Optional[List[float]]:
+        """Read ANLZ beatgrid for a track, returning downbeat (beat 1) times in ms.
+
+        Only includes beat 1 of each bar so that cue snapping lands on bar
+        boundaries. Returns None if no ANLZ files exist, no PQTZ tag found,
+        or data is corrupt.
+        """
+        try:
+            anlz_files = self.db.read_anlz_files(content)
+            for anlz_file in anlz_files.values():
+                if "PQTZ" in anlz_file:
+                    beats, bpms, times = anlz_file.get("PQTZ")
+                    # Filter to beat 1 (downbeats) only; times are in seconds
+                    return sorted(
+                        float(t) * 1000.0
+                        for b, t in zip(beats, times)
+                        if int(b) == 1
+                    )
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def has_bass_swap(effects: List[str]) -> bool:
@@ -311,82 +365,52 @@ class RekordboxImporter:
         )
         self.db.add(cue)
 
-    def _add_outgoing_cues(
+    def _add_transition_cues(
         self,
         content: tables.DjmdContent,
         bpm: float,
-        end_beat: float,
+        anchor_beat: float,
         transition: Dict,
         cue_prep: str,
         cue_start: str,
         cue_bass: str,
         cue_end: str,
+        beat_times_ms: Optional[List[float]] = None,
     ):
-        """Add cue points for an outgoing transition (end of a track)."""
+        """Add cue points for a transition.
+
+        anchor_beat is the beat where the transition starts (end_beat for
+        outgoing, start_beat for incoming). The transition extends forward
+        from anchor_beat by duration_beats.
+
+        Cue layout (e.g. A-D or E-H):
+          prep  = PREP_BARS bars before transition start
+          start = transition start
+          bass  = bass swap position (only if bass swap effect present)
+          end   = transition end
+        """
         duration_beats = transition["duration_beats"]
         effects = transition.get("effects", [])
         effect_offset = transition.get("effect_offset", 0)
-
-        trans_start_beat = end_beat - duration_beats
-        trans_end_beat = end_beat
-        prep_beats = self.get_prep_beats(duration_beats)
+        prep_beats = self.PREP_BARS * 4
 
         self.add_hot_cue(
             content, cue_prep,
-            self.beats_to_ms(trans_start_beat - prep_beats, bpm), "Prep",
+            self.snapped_beats_to_ms(anchor_beat - prep_beats, bpm, beat_times_ms), "Prep",
         )
         self.add_hot_cue(
             content, cue_start,
-            self.beats_to_ms(trans_start_beat, bpm), "Trans Start",
+            self.snapped_beats_to_ms(anchor_beat, bpm, beat_times_ms), "Trans Start",
         )
         if self.has_bass_swap(effects):
             bass_offset = effect_offset if effect_offset > 0 else duration_beats / 2
             self.add_hot_cue(
                 content, cue_bass,
-                self.beats_to_ms(trans_start_beat + bass_offset, bpm), "Bass Swap",
+                self.snapped_beats_to_ms(anchor_beat + bass_offset, bpm, beat_times_ms), "Bass Swap",
             )
         self.add_hot_cue(
             content, cue_end,
-            self.beats_to_ms(trans_end_beat, bpm), "Trans End",
-        )
-
-    def _add_incoming_cues(
-        self,
-        content: tables.DjmdContent,
-        bpm: float,
-        start_beat: float,
-        transition: Dict,
-        cue_prep: str,
-        cue_start: str,
-        cue_bass: str,
-        cue_end: str,
-    ):
-        """Add cue points for an incoming transition (start of a track)."""
-        duration_beats = transition["duration_beats"]
-        effects = transition.get("effects", [])
-        effect_offset = transition.get("effect_offset", 0)
-
-        trans_start_beat = start_beat
-        trans_end_beat = start_beat + duration_beats
-        prep_beats = self.get_prep_beats(duration_beats)
-
-        self.add_hot_cue(
-            content, cue_prep,
-            self.beats_to_ms(trans_start_beat - prep_beats, bpm), "Prep",
-        )
-        self.add_hot_cue(
-            content, cue_start,
-            self.beats_to_ms(trans_start_beat, bpm), "Trans Start",
-        )
-        if self.has_bass_swap(effects):
-            bass_offset = effect_offset if effect_offset > 0 else duration_beats / 2
-            self.add_hot_cue(
-                content, cue_bass,
-                self.beats_to_ms(trans_start_beat + bass_offset, bpm), "Bass Swap",
-            )
-        self.add_hot_cue(
-            content, cue_end,
-            self.beats_to_ms(trans_end_beat, bpm), "Trans End",
+            self.snapped_beats_to_ms(anchor_beat + duration_beats, bpm, beat_times_ms), "Trans End",
         )
 
     def set_track_cues(
@@ -396,12 +420,16 @@ class RekordboxImporter:
         incoming_trans: Optional[Dict],
         outgoing_trans: Optional[Dict],
         is_first: bool,
+        beat_times_ms: Optional[List[float]] = None,
     ):
-        """Set hot cue points on a track following the DJ Studio convention.
+        """Set hot cue points on a track.
 
-        First track (5 cues):  A=play start, B-E=outgoing transition
-        Middle tracks (8 cues): B-E=incoming, A/F-H=outgoing
-        Last track (4 cues):   B-E=incoming only
+        Cue layout:
+          A-D = incoming transition (A=prep, B=start, C=bass swap, D=end)
+          E-H = outgoing transition (E=prep, F=start, G=bass swap, H=end)
+
+        Outgoing transition starts at end_beat and extends forward.
+        If a transition or bass swap doesn't exist, those letters are left empty.
         """
         bpm = track.get("bpm", 0)
         if not bpm or bpm <= 0:
@@ -412,29 +440,18 @@ class RekordboxImporter:
 
         self.clear_hot_cues(content)
 
-        if is_first:
-            # A = play start position
-            self.add_hot_cue(
-                content, "A", self.beats_to_ms(start_beat, bpm), "Play Start",
+        if incoming_trans:
+            self._add_transition_cues(
+                content, bpm, start_beat, incoming_trans,
+                cue_prep="A", cue_start="B", cue_bass="C", cue_end="D",
+                beat_times_ms=beat_times_ms,
             )
-            if outgoing_trans:
-                self._add_outgoing_cues(
-                    content, bpm, end_beat, outgoing_trans,
-                    cue_prep="B", cue_start="C", cue_bass="D", cue_end="E",
-                )
-        else:
-            # Incoming transition → pads B, C, D, E
-            if incoming_trans:
-                self._add_incoming_cues(
-                    content, bpm, start_beat, incoming_trans,
-                    cue_prep="B", cue_start="C", cue_bass="D", cue_end="E",
-                )
-            # Outgoing transition → pads A, F, G, H
-            if outgoing_trans:
-                self._add_outgoing_cues(
-                    content, bpm, end_beat, outgoing_trans,
-                    cue_prep="A", cue_start="F", cue_bass="G", cue_end="H",
-                )
+        if outgoing_trans:
+            self._add_transition_cues(
+                content, bpm, end_beat, outgoing_trans,
+                cue_prep="E", cue_start="F", cue_bass="G", cue_end="H",
+                beat_times_ms=beat_times_ms,
+            )
 
         self.db.flush()
 
@@ -444,6 +461,7 @@ class RekordboxImporter:
         incoming_trans: Optional[Dict],
         outgoing_trans: Optional[Dict],
         is_first: bool,
+        beat_times_ms: Optional[List[float]] = None,
     ) -> List[Dict]:
         """Compute cue points for a track without writing to DB (for dry run)."""
         bpm = track.get("bpm", 0)
@@ -452,46 +470,28 @@ class RekordboxImporter:
 
         start_beat = track.get("start_beat", 0)
         end_beat = track.get("end_beat", 0)
+        snapped = beat_times_ms is not None and self.snap
         cues = []
+        prep_beats = self.PREP_BARS * 4
 
         def add(letter, ms, label):
-            cues.append({"letter": letter, "ms": max(0, ms), "label": label})
+            cues.append({"letter": letter, "ms": max(0, ms), "label": label, "snapped": snapped})
 
-        def add_outgoing(trans, prep_l, start_l, bass_l, end_l):
+        def add_transition(anchor, trans, prep_l, start_l, bass_l, end_l):
             d = trans["duration_beats"]
             effects = trans.get("effects", [])
             eo = trans.get("effect_offset", 0)
-            ts = end_beat - d
-            prep = self.get_prep_beats(d)
-            add(prep_l, self.beats_to_ms(ts - prep, bpm), "Prep")
-            add(start_l, self.beats_to_ms(ts, bpm), "Trans Start")
+            add(prep_l, self.snapped_beats_to_ms(anchor - prep_beats, bpm, beat_times_ms), "Prep")
+            add(start_l, self.snapped_beats_to_ms(anchor, bpm, beat_times_ms), "Trans Start")
             if self.has_bass_swap(effects):
                 bo = eo if eo > 0 else d / 2
-                add(bass_l, self.beats_to_ms(ts + bo, bpm), "Bass Swap")
-            add(end_l, self.beats_to_ms(end_beat, bpm), "Trans End")
+                add(bass_l, self.snapped_beats_to_ms(anchor + bo, bpm, beat_times_ms), "Bass Swap")
+            add(end_l, self.snapped_beats_to_ms(anchor + d, bpm, beat_times_ms), "Trans End")
 
-        def add_incoming(trans, prep_l, start_l, bass_l, end_l):
-            d = trans["duration_beats"]
-            effects = trans.get("effects", [])
-            eo = trans.get("effect_offset", 0)
-            ts = start_beat
-            prep = self.get_prep_beats(d)
-            add(prep_l, self.beats_to_ms(ts - prep, bpm), "Prep")
-            add(start_l, self.beats_to_ms(ts, bpm), "Trans Start")
-            if self.has_bass_swap(effects):
-                bo = eo if eo > 0 else d / 2
-                add(bass_l, self.beats_to_ms(ts + bo, bpm), "Bass Swap")
-            add(end_l, self.beats_to_ms(ts + d, bpm), "Trans End")
-
-        if is_first:
-            add("A", self.beats_to_ms(start_beat, bpm), "Play Start")
-            if outgoing_trans:
-                add_outgoing(outgoing_trans, "B", "C", "D", "E")
-        else:
-            if incoming_trans:
-                add_incoming(incoming_trans, "B", "C", "D", "E")
-            if outgoing_trans:
-                add_outgoing(outgoing_trans, "A", "F", "G", "H")
+        if incoming_trans:
+            add_transition(start_beat, incoming_trans, "A", "B", "C", "D")
+        if outgoing_trans:
+            add_transition(end_beat, outgoing_trans, "E", "F", "G", "H")
 
         return cues
 
@@ -516,7 +516,6 @@ class RekordboxImporter:
             "unmatched": [],
             "playlist_created": False,
             "effects_written": 0,
-            "cues_written": 0,
         }
 
         # Step 1: Match tracks, create missing Beatport tracks
@@ -607,31 +606,84 @@ class RekordboxImporter:
                     self.set_track_effects(content, outgoing_effects, incoming_effects)
                 report["effects_written"] += 1
 
-        # Step 3b: Write hot cue points (or preview for dry run)
-        for track, content in matched_contents:
+        # Step 4: Commit
+        if not self.dry_run:
+            self.db.commit()
+
+        return report
+
+    def import_cues_only(self, json_data: Dict) -> Dict:
+        """Pass 2: find existing tracks, read ANLZ beatgrids, snap & write cues.
+
+        Assumes tracks and playlist already exist from Pass 1.
+        """
+        tracks = json_data["tracks"]
+        transitions = json_data.get("transitions", [])
+        mix_name = json_data["metadata"]["name"]
+
+        trans_by_num = {t["number"]: t for t in transitions}
+
+        report = {
+            "mix_name": mix_name,
+            "total_tracks": len(tracks),
+            "found": [],
+            "not_found": [],
+            "no_beatgrid": [],
+            "cues_written": 0,
+        }
+
+        for track in sorted(tracks, key=lambda t: t["position"]):
+            library_key = track.get("library_key", "")
+            beatport_id = None
+            if "beatport-sdk_" in library_key:
+                beatport_id = library_key.split("_", 1)[1]
+
+            content = None
+            if beatport_id:
+                content = self.find_track_by_beatport_id(beatport_id)
+
             if content is None:
+                report["not_found"].append({
+                    "position": track["position"],
+                    "title": track.get("title", "?"),
+                    "artist": track.get("artist", "?"),
+                    "beatport_id": beatport_id,
+                })
                 continue
 
             pos = track["position"]
             is_first = pos == 1
-
             outgoing = trans_by_num.get(pos)
             incoming = trans_by_num.get(pos - 1)
 
-            cue_preview = self.preview_track_cues(track, incoming, outgoing, is_first)
+            # Read Rekordbox's analyzed beatgrid
+            beat_times_ms = self.get_beatgrid(content)
+            snapped = beat_times_ms is not None and self.snap
+
+            if beat_times_ms is None:
+                report["no_beatgrid"].append(track.get("title", "?"))
+
+            cue_preview = self.preview_track_cues(
+                track, incoming, outgoing, is_first, beat_times_ms=beat_times_ms,
+            )
 
             if not self.dry_run:
-                self.set_track_cues(content, track, incoming, outgoing, is_first)
+                self.set_track_cues(
+                    content, track, incoming, outgoing, is_first,
+                    beat_times_ms=beat_times_ms,
+                )
 
             report["cues_written"] += 1
+            report["found"].append({
+                "position": pos,
+                "title": track.get("title", "?"),
+                "artist": track.get("artist", "?"),
+                "beatport_id": beatport_id,
+                "rb_id": content.ID,
+                "snapped": snapped,
+                "cues": cue_preview,
+            })
 
-            # Attach preview to report entries
-            for entry_list in (report["matched"], report["created"]):
-                for m in entry_list:
-                    if m["position"] == pos:
-                        m["cues"] = cue_preview
-
-        # Step 4: Commit
         if not self.dry_run:
             self.db.commit()
 
@@ -704,10 +756,62 @@ def print_report(report: Dict, dry_run: bool):
         if report["created"]:
             print(f"{created} new tracks added to rekordbox collection.")
         print(f"Effects written to {report['effects_written']} tracks.")
-        print(f"Hot cues written to {report['cues_written']} tracks.")
+        print(f"\nNext steps:")
+        print(f"  1. Open rekordbox and let it analyze all tracks in the playlist")
+        print(f"  2. Once analysis is complete, close rekordbox and run:")
+        print(f"     python3 import_to_rekordbox.py {report['mix_name']}.json --cues-only")
     else:
         if unmatched > 0 and any(u.get("beatport_id") for u in report["unmatched"]):
             print(f"\n{unmatched} tracks will be created in rekordbox on actual run.")
+        print(f"\nNo changes made (dry run).")
+
+    print(f"{'=' * 70}\n")
+
+
+def print_cues_report(report: Dict, dry_run: bool):
+    """Pretty-print the cues-only (Pass 2) report."""
+    prefix = "[DRY RUN] " if dry_run else ""
+
+    print(f"\n{'=' * 70}")
+    print(f"{prefix}Cues Report: {report['mix_name']}")
+    print(f"{'=' * 70}")
+
+    found = len(report["found"])
+    not_found = len(report["not_found"])
+    snapped_count = sum(1 for t in report["found"] if t["snapped"])
+    unsnapped_count = found - snapped_count
+
+    print(f"\nTracks: {report['total_tracks']} total, "
+          f"{found} found in DB, "
+          f"{not_found} not found")
+
+    if report["found"]:
+        print(f"\nCue points:")
+        for entry in report["found"]:
+            snap_tag = "[SNAPPED]" if entry["snapped"] else "[unsnapped]"
+            suffix = f" (BP:{entry['beatport_id']})" if entry.get("beatport_id") else ""
+            print(f"  {entry['position']:2}. {entry['artist']} - {entry['title']}{suffix}  {snap_tag}")
+            cues = entry.get("cues", [])
+            if cues:
+                cue_strs = [f"{c['letter']}={_fmt_ms(c['ms'])}({c['label']})" for c in cues]
+                print(f"      Cues: {', '.join(cue_strs)}")
+
+    if report["not_found"]:
+        print(f"\nNot found in DB (run Pass 1 first):")
+        for entry in report["not_found"]:
+            bp = f" (BP:{entry['beatport_id']})" if entry.get("beatport_id") else ""
+            print(f"  {entry['position']:2}. {entry['artist']} - {entry['title']}{bp}")
+
+    if report["no_beatgrid"]:
+        print(f"\nNo beatgrid (analyze in rekordbox first):")
+        for title in report["no_beatgrid"]:
+            print(f"  - {title}")
+
+    print(f"\nSummary: {snapped_count} snapped, {unsnapped_count} unsnapped")
+
+    if not dry_run:
+        print(f"Hot cues written to {report['cues_written']} tracks.")
+    else:
         print(f"\nNo changes made (dry run).")
 
     print(f"{'=' * 70}\n")
@@ -718,9 +822,18 @@ def main():
         description="Import DJ Studio mix JSON into rekordbox database",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Two-pass workflow:
+  Pass 1: %(prog)s mix.json              Create tracks, playlist, effects
+  Pass 2: %(prog)s mix.json --cues-only  Write cues snapped to rekordbox beatgrid
+
+Between passes, open rekordbox and analyze all tracks in the playlist.
+
 Examples:
-  %(prog)s mix.json --dry-run    Preview what would be imported
-  %(prog)s mix.json              Import mix into rekordbox
+  %(prog)s mix.json --dry-run              Preview Pass 1
+  %(prog)s mix.json                        Run Pass 1
+  %(prog)s mix.json --cues-only --dry-run  Preview Pass 2 (with snap status)
+  %(prog)s mix.json --cues-only            Run Pass 2 (snapped cues)
+  %(prog)s mix.json --cues-only --no-snap  Run Pass 2 (unsnapped fallback)
 
 Input JSON is generated by:
   python3 get_mix_info.py "Mix Name" -o mix.json
@@ -734,6 +847,16 @@ IMPORTANT: Close rekordbox before running this script!
         "--dry-run",
         action="store_true",
         help="Show what would be done without writing to DB",
+    )
+    parser.add_argument(
+        "--cues-only",
+        action="store_true",
+        help="Pass 2: write cues only (snapped to rekordbox beatgrid)",
+    )
+    parser.add_argument(
+        "--no-snap",
+        action="store_true",
+        help="With --cues-only: skip beatgrid snapping (use raw beat positions)",
     )
 
     args = parser.parse_args()
@@ -758,10 +881,17 @@ IMPORTANT: Close rekordbox before running this script!
     if args.dry_run:
         print("\n--- DRY RUN MODE ---")
 
-    importer = RekordboxImporter(dry_run=args.dry_run)
+    snap = not args.no_snap
+    importer = RekordboxImporter(
+        dry_run=args.dry_run, cues_only=args.cues_only, snap=snap,
+    )
     try:
-        report = importer.import_mix(json_data)
-        print_report(report, args.dry_run)
+        if args.cues_only:
+            report = importer.import_cues_only(json_data)
+            print_cues_report(report, args.dry_run)
+        else:
+            report = importer.import_mix(json_data)
+            print_report(report, args.dry_run)
     finally:
         importer.close()
 

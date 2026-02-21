@@ -13,6 +13,9 @@ Import mixes from DJ.Studio into rekordbox — playlists, transition metadata, a
          |                         |                       Hot cues A-H per track
          v                         v                              ^
    get_mix_info.py  ──────>  JSON file  ──────>  import_to_rekordbox.py
+                                                   Pass 1: tracks/playlist/effects
+                                                   → analyze in rekordbox →
+                                                   Pass 2 (--cues-only): snapped cues
 ```
 
 ## What It Does
@@ -21,7 +24,7 @@ Import mixes from DJ.Studio into rekordbox — playlists, transition metadata, a
 - **Matches** tracks to rekordbox by Beatport ID; creates missing ones as streaming entries (`FileType=20`)
 - **Creates** a rekordbox playlist with tracks in mix order
 - **Writes** transition effect names into each track's Comment field
-- **Sets hot cue points** on each track based on transition positions for live performance
+- **Sets hot cue points** on each track, snapped to rekordbox's analyzed beatgrid for accurate placement
 
 ## Hot Cue Layout
 
@@ -56,16 +59,21 @@ python3 -m venv .venv
 
 ```bash
 # 1. List available mixes
-python3 get_mix_info.py --list
+.venv/bin/python3 get_mix_info.py --list
 
 # 2. Export a mix to JSON
-python3 get_mix_info.py "Ibiza Vibes" -o ibiza.json
+.venv/bin/python3 get_mix_info.py "Ibiza Vibes" -o mix.json
 
 # 3. Preview import (no changes)
-.venv/bin/python3 import_to_rekordbox.py ibiza.json --dry-run
+.venv/bin/python3 import_to_rekordbox.py mix.json --dry-run
 
-# 4. Close rekordbox, then import
-.venv/bin/python3 import_to_rekordbox.py ibiza.json
+# 4. Close rekordbox, then run Pass 1 (creates tracks, playlist, effects)
+.venv/bin/python3 import_to_rekordbox.py mix.json
+
+# 5. Open rekordbox and let it analyze all tracks in the playlist
+
+# 6. Close rekordbox, then run Pass 2 (writes cues snapped to beatgrid)
+.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only
 ```
 
 ## Scripts
@@ -74,11 +82,11 @@ python3 get_mix_info.py "Ibiza Vibes" -o ibiza.json
 
 Reads DJ.Studio's local database and audio library cache to produce a JSON file.
 
-```
-python3 get_mix_info.py --list                    # List all mixes
-python3 get_mix_info.py "Mix Name"                # Show mix details
-python3 get_mix_info.py "Mix Name" --json         # Output as JSON
-python3 get_mix_info.py "Mix Name" -o file.json   # Export to file
+```bash
+.venv/bin/python3 get_mix_info.py --list                    # List all mixes
+.venv/bin/python3 get_mix_info.py "Mix Name"                # Show mix details
+.venv/bin/python3 get_mix_info.py "Mix Name" --json         # Output as JSON
+.venv/bin/python3 get_mix_info.py "Mix Name" -o file.json   # Export to file
 ```
 
 **Data sources:**
@@ -103,21 +111,35 @@ python3 get_mix_info.py "Mix Name" -o file.json   # Export to file
 
 ### `import_to_rekordbox.py` — Import into rekordbox DB
 
-Writes directly into rekordbox's encrypted database via pyrekordbox. Bypasses XML import (which doesn't work for Beatport streaming tracks).
+Writes directly into rekordbox's encrypted database via pyrekordbox. Bypasses XML import (which doesn't work for Beatport streaming tracks). Uses a two-pass workflow so cue points can be snapped to rekordbox's analyzed beatgrid.
 
-```
-python3 import_to_rekordbox.py mix.json            # Import
-python3 import_to_rekordbox.py mix.json --dry-run   # Preview only
+```bash
+# Pass 1: tracks, playlist, effects (no cues)
+.venv/bin/python3 import_to_rekordbox.py mix.json
+.venv/bin/python3 import_to_rekordbox.py mix.json --dry-run
+
+# Pass 2: cues snapped to rekordbox's beatgrid
+.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only
+.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only --dry-run
+
+# Pass 2 without snapping (fallback to raw beat positions)
+.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only --no-snap
 ```
 
-**What it does:**
+**Pass 1** — create tracks and playlist:
 
 1. **Match tracks** — looks up each Beatport ID via `FolderPath = /v4/catalog/tracks/{ID}/`
 2. **Create missing tracks** — as Beatport streaming entries (`FileType=20`) with artist, genre, key, BPM
 3. **Create playlist** — named after the mix
 4. **Add tracks** — in correct mix order
 5. **Write effects** — transition effect names stored in each track's Comment field
-6. **Write hot cues** — A-H cue points based on transition positions and beat data
+
+**Pass 2** (`--cues-only`) — write cues after rekordbox analysis:
+
+6. **Read beatgrid** — loads ANLZ files and extracts the PQTZ beat grid (times in ms)
+7. **Snap cues** — each cue position is snapped to the nearest beat in rekordbox's grid via binary search
+8. **Write hot cues** — A-H cue points based on transition positions, aligned to rekordbox's beat grid
+9. **Graceful fallback** — tracks without ANLZ data get unsnapped cues (reported as `[unsnapped]`)
 
 ## Requirements
 
@@ -143,6 +165,15 @@ Transition N describes the mix between track N and track N+1:
 ### Hot cue implementation
 
 - Cues written as `DjmdCue` entries with `Kind` 1-8 (A-H)
-- Positions calculated from beat data: `beat * 60000 / bpm` = milliseconds
+- Raw positions calculated from beat data: `beat * 60000 / bpm` = milliseconds
+- In Pass 2, raw positions are snapped to the nearest beat in rekordbox's ANLZ beatgrid (PQTZ tag) using `bisect_left`
 - Existing hot cues on a track are cleared before writing new ones
 - Bass swap position uses `effect_offset` if > 0, otherwise transition midpoint
+
+### Two-pass workflow
+
+DJ.Studio and rekordbox analyze tracks independently, producing different beat grids. Cue points computed from DJ.Studio's beat positions can drift relative to rekordbox's grid. The two-pass approach fixes this:
+
+1. **Pass 1** creates tracks/playlist/effects so rekordbox can see and analyze them
+2. **Rekordbox analysis** generates ANLZ files with a PQTZ beat grid per track
+3. **Pass 2** reads those beat grids and snaps each cue to the nearest analyzed beat
