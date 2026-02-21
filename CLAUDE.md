@@ -35,7 +35,7 @@ No test suite exists. Use `--dry-run` to verify import behavior without writing 
 
 **`get_mix_info.py`** reads DJ.Studio's local files and produces a JSON intermediate format:
 - `~/Music/DJ.Studio/Database/projects-table/{uuid}` — mix project data (track order, transitions with duration/effects/offset)
-- `~/Music/DJ.Studio/Cache/Database/audio-library-table.json` — track metadata (BPM, key, cue points with `start_beat`/`end_beat`)
+- `~/Music/DJ.Studio/Database/audio-library-table/{hash_prefix}/{library_key}` — sharded track metadata (BPM, key, cue points with `start_beat`/`end_beat`)
 - Converts DJ.Studio numeric keys to Camelot notation via a hardcoded map
 
 **`import_to_rekordbox.py`** reads that JSON and writes into rekordbox's encrypted SQLite via `pyrekordbox.Rekordbox6Database`:
@@ -48,10 +48,11 @@ No test suite exists. Use `--dry-run` to verify import behavior without writing 
 ## Key Design Decisions
 
 - **Direct DB writes via pyrekordbox** — XML import doesn't work for Beatport streaming tracks, so we write to `master.db` directly. Rekordbox must be closed.
-- **Hot cue layout** — First track: A=play start, B-E=outgoing transition. Middle tracks: B-E=incoming, A/F-H=outgoing. Last track: B-E=incoming only.
-- **Prep cue distance** — 8, 16, or 32 beats before transition start, bucketed by `get_prep_beats(duration_beats)`.
+- **Hot cue layout** — A-D = incoming transition (A=prep, B=start, C=bass swap, D=end). E-H = outgoing transition (E=prep, F=start, G=bass swap, H=end). Letters left empty when transition or bass swap doesn't exist.
+- **Outgoing transition direction** — Starts AT `end_beat` and extends forward by `duration_beats` (not backward). Incoming starts at `start_beat` and extends forward.
+- **Prep cue distance** — `PREP_BARS` (default 8) bars before transition start. Configurable class constant.
 - **Bass swap cue** — Only written when `AE_Bass_Swap`, `AE_Bass_SwapFade`, or `AE_Bass_CrossFade` is in the effects list. Position uses `effect_offset` if > 0, else transition midpoint.
-- **Two-pass import** — Pass 1 creates tracks/playlist/effects but skips cues. After rekordbox analyzes the tracks (generating ANLZ beatgrids), Pass 2 (`--cues-only`) reads the PQTZ tag from ANLZ files and snaps cue points to the nearest beat in rekordbox's grid via binary search (`bisect_left`). `--no-snap` disables snapping for fallback.
+- **Two-pass import** — Pass 1 creates tracks/playlist/effects but skips cues. After rekordbox analyzes the tracks (generating ANLZ beatgrids), Pass 2 (`--cues-only`) reads the PQTZ tag from ANLZ files and snaps cue points to the nearest downbeat (beat 1 of bar) via binary search (`bisect_left`). `--no-snap` disables snapping for fallback.
 - **Beat-to-ms conversion** — `beat * 60000 / bpm`. Uses each track's own BPM.
 - **Transition numbering** — Transition N = mix between track N and track N+1. Outgoing = `trans_by_num[pos]`, incoming = `trans_by_num[pos-1]`.
 - **BPM storage** — Rekordbox stores BPM as integer * 100 (129 BPM = 12900).
