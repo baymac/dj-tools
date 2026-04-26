@@ -262,7 +262,8 @@ def cmd_populate(conn: sqlite3.Connection, args):
         artist = tag.get("artist", "Unknown")
         genre = tag.get("genre", "")
         bpm = track.get("bpm")
-        key = camelot_key(track.get("camelotKey"))
+        # mikKey is MIK's analyzed key; camelotKey may be Beatport metadata or user-edited
+        key = camelot_key(track.get("mikKey") or track.get("camelotKey"))
 
         # mikEnergy is 1-10 from Mixed In Key analysis — use as-is
         mik_energy = track.get("mikEnergy") or None
