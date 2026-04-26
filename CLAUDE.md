@@ -9,27 +9,25 @@ Two-script pipeline that imports DJ.Studio mixes into rekordbox's encrypted data
 ## Commands
 
 ```bash
-# Run with venv (pyrekordbox requires it)
-.venv/bin/python get_mix_info.py --list
-.venv/bin/python get_mix_info.py "Mix Name" -o mix.json
+uv run get_mix_info.py --list
+uv run get_mix_info.py "Mix Name" -o mix.json
 
 # Two-pass import workflow:
 # Pass 1: create tracks, playlist, effects (no cues)
-.venv/bin/python import_to_rekordbox.py mix.json --dry-run
-.venv/bin/python import_to_rekordbox.py mix.json
+uv run import_to_rekordbox.py mix.json --dry-run
+uv run import_to_rekordbox.py mix.json
 # → Open rekordbox, analyze all tracks, close rekordbox
 # Pass 2: write cues snapped to rekordbox's beatgrid
-.venv/bin/python import_to_rekordbox.py mix.json --cues-only --dry-run
-.venv/bin/python import_to_rekordbox.py mix.json --cues-only
+uv run import_to_rekordbox.py mix.json --cues-only --dry-run
+uv run import_to_rekordbox.py mix.json --cues-only
 # Pass 2 without snapping (fallback to raw beat positions)
-.venv/bin/python import_to_rekordbox.py mix.json --cues-only --no-snap
+uv run import_to_rekordbox.py mix.json --cues-only --no-snap
 
 # Setup
-python3 -m venv .venv
-.venv/bin/pip install pyrekordbox
+uv sync
 ```
 
-No test suite exists. Use `--dry-run` to verify import behavior without writing to the database. Syntax check: `.venv/bin/python -c "import py_compile; py_compile.compile('import_to_rekordbox.py', doraise=True)"`.
+Run tests: `uv run pytest`. Use `--dry-run` to verify import behavior without writing to the database.
 
 ## Architecture
 
