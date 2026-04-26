@@ -51,29 +51,28 @@ Last track (up to 4 cues):           G = Outgoing bass swap (if present)
 
 ```bash
 cd /path/to/dj
-python3 -m venv .venv
-.venv/bin/pip install pyrekordbox
+uv sync
 ```
 
 ## Quick Start
 
 ```bash
 # 1. List available mixes
-.venv/bin/python3 get_mix_info.py --list
+uv run get_mix_info.py --list
 
 # 2. Export a mix to JSON
-.venv/bin/python3 get_mix_info.py "Ibiza Vibes" -o mix.json
+uv run get_mix_info.py "Ibiza Vibes" -o mix.json
 
 # 3. Preview import (no changes)
-.venv/bin/python3 import_to_rekordbox.py mix.json --dry-run
+uv run import_to_rekordbox.py mix.json --dry-run
 
 # 4. Close rekordbox, then run Pass 1 (creates tracks, playlist, effects)
-.venv/bin/python3 import_to_rekordbox.py mix.json
+uv run import_to_rekordbox.py mix.json
 
 # 5. Open rekordbox and let it analyze all tracks in the playlist
 
 # 6. Close rekordbox, then run Pass 2 (writes cues snapped to beatgrid)
-.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only
+uv run import_to_rekordbox.py mix.json --cues-only
 ```
 
 ## Scripts
@@ -83,10 +82,10 @@ python3 -m venv .venv
 Reads DJ.Studio's local database and audio library cache to produce a JSON file.
 
 ```bash
-.venv/bin/python3 get_mix_info.py --list                    # List all mixes
-.venv/bin/python3 get_mix_info.py "Mix Name"                # Show mix details
-.venv/bin/python3 get_mix_info.py "Mix Name" --json         # Output as JSON
-.venv/bin/python3 get_mix_info.py "Mix Name" -o file.json   # Export to file
+uv run get_mix_info.py --list                    # List all mixes
+uv run get_mix_info.py "Mix Name"                # Show mix details
+uv run get_mix_info.py "Mix Name" --json         # Output as JSON
+uv run get_mix_info.py "Mix Name" -o file.json   # Export to file
 ```
 
 **Data sources:**
@@ -115,15 +114,15 @@ Writes directly into rekordbox's encrypted database via pyrekordbox. Bypasses XM
 
 ```bash
 # Pass 1: tracks, playlist, effects (no cues)
-.venv/bin/python3 import_to_rekordbox.py mix.json
-.venv/bin/python3 import_to_rekordbox.py mix.json --dry-run
+uv run import_to_rekordbox.py mix.json
+uv run import_to_rekordbox.py mix.json --dry-run
 
 # Pass 2: cues snapped to rekordbox's beatgrid
-.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only
-.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only --dry-run
+uv run import_to_rekordbox.py mix.json --cues-only
+uv run import_to_rekordbox.py mix.json --cues-only --dry-run
 
 # Pass 2 without snapping (fallback to raw beat positions)
-.venv/bin/python3 import_to_rekordbox.py mix.json --cues-only --no-snap
+uv run import_to_rekordbox.py mix.json --cues-only --no-snap
 ```
 
 **Pass 1** — create tracks and playlist:
@@ -143,8 +142,8 @@ Writes directly into rekordbox's encrypted database via pyrekordbox. Bypasses XM
 
 ## Requirements
 
-- Python 3
-- [pyrekordbox](https://github.com/dylanljones/pyrekordbox) (`pip install pyrekordbox`)
+- [uv](https://docs.astral.sh/uv/) (`brew install uv`)
+- [pyrekordbox](https://github.com/dylanljones/pyrekordbox) (installed via `uv sync`)
 - Rekordbox must be **closed** before running the import
 
 ## Technical Details
