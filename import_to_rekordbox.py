@@ -26,6 +26,9 @@ Requirements:
 
 import bisect
 import json
+import re
+import shutil
+import subprocess
 import sys
 import argparse
 import datetime
@@ -52,12 +55,54 @@ CUE_KIND = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "G": 7, "H": 8}
 # Effects that indicate a bass swap is present in a transition
 BASS_SWAP_EFFECTS = {"AE_Bass_Swap", "AE_Bass_SwapFade", "AE_Bass_CrossFade"}
 
+RB6 = Path.home() / "Library" / "Application Support" / "Pioneer" / "rekordbox6"
+RB_DB_PATH = RB6 / "master.db"
+RB_BACKUP_DIR = RB6 / "claude-backups"
+
+
+def backup_db(label: str) -> Optional[Path]:
+    """Copy master.db to a timestamped backup before a write operation."""
+    if not RB_DB_PATH.exists():
+        return None
+    RB_BACKUP_DIR.mkdir(exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug = re.sub(r"[^\w-]", "_", label)[:40].strip("_")
+    dest = RB_BACKUP_DIR / f"{ts}_{slug}.db"
+    shutil.copy2(RB_DB_PATH, dest)
+    return dest
+
 
 class RekordboxImporter:
     """Import DJ Studio mixes into rekordbox database."""
 
     MY_TAG_PARENT_ID = "4"  # "Untitled Column" for key tags
-    PREP_BARS = 8  # Number of bars before transition start for the prep cue
+    PREP_BARS = 8  # Default bars before transition start; overridden per genre
+
+    # Genre substring (lowercase) → bars before transition start
+    GENRE_PREP_BARS: Dict[str, int] = {
+        # Techno / industrial: slow-moving, needs a 16-bar runway
+        "techno": 16,
+        "industrial": 16,
+        # Trance: long peak-time builds
+        "trance": 16,
+        "psytrance": 16,
+        # House / afro / melodic: standard 8-bar phrasing
+        "house": 8,
+        "disco": 8,
+        "afro": 8,
+        "melodic": 8,
+        "electronica": 8,
+        # Fast-phrased or bar-dense genres: 4 bars is plenty
+        "drum and bass": 4,
+        "dnb": 4,
+        "jungle": 4,
+        "hip hop": 4,
+        "hip-hop": 4,
+        "trap": 4,
+        "r&b": 4,
+        "reggaeton": 4,
+        "breakbeat": 4,
+    }
 
     def __init__(self, dry_run: bool = False, cues_only: bool = False, snap: bool = True):
         self.dry_run = dry_run
@@ -73,6 +118,22 @@ class RekordboxImporter:
     def close(self):
         if self.db is not None:
             self.db.close()
+
+    def _prep_bars_for(self, genre: Optional[str], duration_beats: float) -> int:
+        """Bars before transition start, tuned to genre and transition length.
+
+        Caps at half the transition duration in bars so the prep cue never
+        lands before the previous transition's end cue.
+        """
+        bars = self.PREP_BARS
+        if genre:
+            g = genre.lower()
+            for keyword, mapped in self.GENRE_PREP_BARS.items():
+                if keyword in g:
+                    bars = mapped
+                    break
+        max_bars = max(2, int(duration_beats / 8))
+        return min(bars, max_bars)
 
     @property
     def device(self):
@@ -376,6 +437,7 @@ class RekordboxImporter:
         cue_bass: str,
         cue_end: str,
         beat_times_ms: Optional[List[float]] = None,
+        genre: Optional[str] = None,
     ):
         """Add cue points for a transition.
 
@@ -384,7 +446,7 @@ class RekordboxImporter:
         from anchor_beat by duration_beats.
 
         Cue layout (e.g. A-D or E-H):
-          prep  = PREP_BARS bars before transition start
+          prep  = genre-tuned bars before transition start
           start = transition start
           bass  = bass swap position (only if bass swap effect present)
           end   = transition end
@@ -392,7 +454,7 @@ class RekordboxImporter:
         duration_beats = transition["duration_beats"]
         effects = transition.get("effects", [])
         effect_offset = transition.get("effect_offset", 0)
-        prep_beats = self.PREP_BARS * 4
+        prep_beats = self._prep_bars_for(genre, duration_beats) * 4
 
         self.add_hot_cue(
             content, cue_prep,
@@ -435,6 +497,7 @@ class RekordboxImporter:
         if not bpm or bpm <= 0:
             return
 
+        genre = track.get("genre")
         start_beat = track.get("start_beat", 0)
         end_beat = track.get("end_beat", 0)
 
@@ -444,13 +507,13 @@ class RekordboxImporter:
             self._add_transition_cues(
                 content, bpm, start_beat, incoming_trans,
                 cue_prep="A", cue_start="B", cue_bass="C", cue_end="D",
-                beat_times_ms=beat_times_ms,
+                beat_times_ms=beat_times_ms, genre=genre,
             )
         if outgoing_trans:
             self._add_transition_cues(
                 content, bpm, end_beat, outgoing_trans,
                 cue_prep="E", cue_start="F", cue_bass="G", cue_end="H",
-                beat_times_ms=beat_times_ms,
+                beat_times_ms=beat_times_ms, genre=genre,
             )
 
         self.db.flush()
@@ -468,11 +531,11 @@ class RekordboxImporter:
         if not bpm or bpm <= 0:
             return []
 
+        genre = track.get("genre")
         start_beat = track.get("start_beat", 0)
         end_beat = track.get("end_beat", 0)
         snapped = beat_times_ms is not None and self.snap
         cues = []
-        prep_beats = self.PREP_BARS * 4
 
         def add(letter, ms, label):
             cues.append({"letter": letter, "ms": max(0, ms), "label": label, "snapped": snapped})
@@ -481,6 +544,7 @@ class RekordboxImporter:
             d = trans["duration_beats"]
             effects = trans.get("effects", [])
             eo = trans.get("effect_offset", 0)
+            prep_beats = self._prep_bars_for(genre, d) * 4
             add(prep_l, self.snapped_beats_to_ms(anchor - prep_beats, bpm, beat_times_ms), "Prep")
             add(start_l, self.snapped_beats_to_ms(anchor, bpm, beat_times_ms), "Trans Start")
             if self.has_bass_swap(effects):
@@ -504,6 +568,11 @@ class RekordboxImporter:
         tracks = json_data["tracks"]
         transitions = json_data.get("transitions", [])
         mix_name = metadata["name"]
+
+        if not self.dry_run:
+            bp = backup_db(mix_name)
+            if bp:
+                print(f"Backup: {bp.name}")
 
         # Build a lookup: transition number -> transition data
         trans_by_num = {t["number"]: t for t in transitions}
@@ -620,6 +689,11 @@ class RekordboxImporter:
         tracks = json_data["tracks"]
         transitions = json_data.get("transitions", [])
         mix_name = json_data["metadata"]["name"]
+
+        if not self.dry_run:
+            bp = backup_db(mix_name + "_cues")
+            if bp:
+                print(f"Backup: {bp.name}")
 
         trans_by_num = {t["number"]: t for t in transitions}
 
@@ -817,6 +891,48 @@ def print_cues_report(report: Dict, dry_run: bool):
     print(f"{'=' * 70}\n")
 
 
+def cmd_undo_list():
+    if not RB_BACKUP_DIR.exists() or not list(RB_BACKUP_DIR.glob("*.db")):
+        print(f"No backups found in {RB_BACKUP_DIR}")
+        return
+    backups = sorted(RB_BACKUP_DIR.glob("*.db"))
+    print(f"Available backups ({RB_BACKUP_DIR}):\n")
+    for b in backups:
+        size_mb = b.stat().st_size / (1024 * 1024)
+        print(f"  {b.name}  ({size_mb:.1f} MB)")
+    print(f"\nRestore: uv run import_to_rekordbox.py undo restore BACKUP_NAME")
+
+
+def cmd_undo_restore(backup_name: str):
+    if subprocess.run(["pgrep", "-x", "rekordbox"], capture_output=True).returncode == 0:
+        print("ERROR: rekordbox is running. Close it before restoring.", file=sys.stderr)
+        sys.exit(1)
+
+    backup_path = RB_BACKUP_DIR / backup_name
+    if not backup_path.exists():
+        matches = list(RB_BACKUP_DIR.glob(f"*{backup_name}*"))
+        if len(matches) == 1:
+            backup_path = matches[0]
+        elif len(matches) > 1:
+            print(f"Ambiguous: multiple backups match '{backup_name}':", file=sys.stderr)
+            for m in matches:
+                print(f"  {m.name}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"Backup not found: {backup_name}", file=sys.stderr)
+            sys.exit(1)
+
+    if not RB_DB_PATH.exists():
+        print(f"rekordbox DB not found at {RB_DB_PATH}", file=sys.stderr)
+        sys.exit(1)
+
+    pre = backup_db("pre-restore")
+    if pre:
+        print(f"Saved current DB as: {pre.name}")
+    shutil.copy2(backup_path, RB_DB_PATH)
+    print(f"Restored {backup_path.name}  →  {RB_DB_PATH}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Import DJ Studio mix JSON into rekordbox database",
@@ -842,7 +958,15 @@ IMPORTANT: Close rekordbox before running this script!
         """,
     )
 
-    parser.add_argument("json_file", help="Path to mix JSON file (from get_mix_info.py)")
+    subparsers = parser.add_subparsers(dest="subcommand")
+
+    undo_p = subparsers.add_parser("undo", help="List or restore from DB backups")
+    undo_sub = undo_p.add_subparsers(dest="undo_command")
+    undo_sub.add_parser("list", help="List available backups")
+    undo_restore_p = undo_sub.add_parser("restore", help="Restore from a backup")
+    undo_restore_p.add_argument("backup", help="Backup filename (from 'undo list')")
+
+    parser.add_argument("json_file", nargs="?", help="Path to mix JSON file (from get_mix_info.py)")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -860,6 +984,19 @@ IMPORTANT: Close rekordbox before running this script!
     )
 
     args = parser.parse_args()
+
+    if args.subcommand == "undo":
+        if not getattr(args, "undo_command", None):
+            undo_p.print_help()
+        elif args.undo_command == "list":
+            cmd_undo_list()
+        elif args.undo_command == "restore":
+            cmd_undo_restore(args.backup)
+        return
+
+    if not args.json_file:
+        parser.print_help()
+        return
 
     # Read JSON
     json_path = Path(args.json_file)
