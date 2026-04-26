@@ -15,11 +15,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import shutil
 import sqlite3
-import struct
 import subprocess
 import sys
 import tempfile
@@ -210,22 +208,44 @@ def _run_djs_bpm(pcm_path: Path) -> int | None:
 
 
 def compute_energy(pcm_path: Path) -> int:
-    """Derive a 1-10 energy score from RMS loudness of the PCM audio.
+    """Derive a 1-10 energy score using spectral + percussive features.
 
-    Maps the typical electronic music dynamic range (-30 to -10 dBFS) to 1-10.
-    Louder / more compressed = higher energy, quieter / more dynamic = lower.
+    Beatport previews are all mastered to similar loudness so raw RMS has no
+    variance. Instead we combine:
+      - High-frequency energy ratio (above 2 kHz): tracks with more hi-hats /
+        noise / brightness score higher
+      - Onset strength mean: more hits per second → more percussive energy
+
+    Calibrated against the observed mikEnergy distribution in DJ Studio
+    (library clusters at 5-7, rarely above 8).
     """
+    import numpy as np
+    import librosa
+
     raw = pcm_path.read_bytes()
-    n = len(raw) // 4
-    if n == 0:
+    if not raw:
         return 5
-    samples = struct.unpack_from(f"<{n}f", raw)
-    rms = math.sqrt(sum(s * s for s in samples) / n)
-    if rms <= 0:
-        return 1
-    db = 20 * math.log10(rms)          # dBFS  (full scale = 0)
-    # -10 dBFS → 10,  -30 dBFS → 1
-    score = (db - (-30)) / ((-10) - (-30)) * 9 + 1
+    samples = np.frombuffer(raw, dtype="<f4")
+
+    # High-frequency energy ratio
+    S = np.abs(librosa.stft(samples))
+    freqs = librosa.fft_frequencies(sr=44100)
+    hf_ratio = float(S[freqs > 2000, :].mean() / (S.mean() + 1e-9))
+
+    # Onset detection strength (percussive density)
+    onset_mean = float(librosa.onset.onset_strength(y=samples, sr=44100).mean())
+
+    # Map each to 0-1 using calibrated ranges for electronic music previews:
+    #   hf_ratio: ~0.20 (dark/bass-heavy) to ~0.50 (bright/noisy)
+    #   onset_mean: ~0.5 (sparse/ambient) to ~5.0 (dense percussion)
+    hf_norm   = max(0.0, min(1.0, (hf_ratio  - 0.20) / (0.50 - 0.20)))
+    ons_norm  = max(0.0, min(1.0, (onset_mean - 0.50) / (5.00 - 0.50)))
+
+    # Combine: 50% spectral brightness, 50% percussive density
+    combined = 0.5 * hf_norm + 0.5 * ons_norm
+
+    # Map 0-1 → 4-9  (matching observed mikEnergy distribution)
+    score = 4 + combined * 5
     return max(1, min(10, round(score)))
 
 
