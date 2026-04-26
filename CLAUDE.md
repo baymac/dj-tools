@@ -4,13 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Two-script pipeline that imports DJ.Studio mixes into rekordbox's encrypted database via pyrekordbox. Handles Beatport streaming tracks, transition metadata, and hot cue points for live performance.
+Three-script pipeline: `get_mix_info.py` extracts DJ.Studio mix data → `import_to_rekordbox.py` writes it into rekordbox → `track_db.py` maintains a SQLite metadata DB (energy, vocals/drums/melody, section markers) seeded from DJ.Studio's audio library.
 
 ## Commands
 
 ```bash
 uv run get_mix_info.py --list
 uv run get_mix_info.py "Mix Name" -o mix.json
+
+# Track metadata database (energy, vocals/drums/melody, section markers):
+uv run track_db.py populate                        # seed from DJ Studio library
+uv run track_db.py list
+uv run track_db.py show beatport-sdk_12345678
+uv run track_db.py update beatport-sdk_12345678 --energy 8 --vocals high --drums high --melody low
+uv run track_db.py section add beatport-sdk_12345678 intro 0 64
+uv run track_db.py section add beatport-sdk_12345678 drop 128 256
+uv run track_db.py section list beatport-sdk_12345678
 
 # Two-pass import workflow:
 # Pass 1: create tracks, playlist, effects (no cues)
