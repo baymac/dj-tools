@@ -40,6 +40,11 @@ uv run import_to_rekordbox.py mix.json --cues-only --no-snap
 uv run import_to_rekordbox.py undo list
 uv run import_to_rekordbox.py undo restore 20260426_143200_My_Mix.db
 
+# Beatport auth (one-time login, token stored in .beatport_token):
+uv run beatport_auth.py login              # headless browser login
+uv run beatport_auth.py status             # check token validity + API ping
+uv run beatport_auth.py clear              # remove stored token
+
 # Beatport track analysis (key + energy from CLI):
 uv run beatport_analyze.py https://www.beatport.com/track/title/12345678
 uv run beatport_analyze.py <url> --import   # also store in track_metadata.db

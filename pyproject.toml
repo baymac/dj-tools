@@ -6,6 +6,7 @@ dependencies = [
     "pyrekordbox",
     "librosa>=0.10",
     "numpy",
+    "playwright",
 ]
 
 [dependency-groups]

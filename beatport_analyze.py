@@ -30,9 +30,12 @@ from pathlib import Path
 
 SCRIPT_DIR  = Path(__file__).parent
 DJS_ANALYZE = SCRIPT_DIR / "djs_analyze.js"
-CHENNAI_DB  = Path.home() / "conductor/workspaces/beatport/chennai/state/sync.db"
 DJ_LIBRARY  = Path.home() / "Music/DJ.Studio/Database/audio-library-table"
 TRACK_DB    = Path.home() / "Music/DJ.Studio/track_metadata.db"
+
+# Token locations: local store takes priority, falls back to chennai DB
+_LOCAL_TOKEN_FILE = SCRIPT_DIR / ".beatport_token"
+_CHENNAI_DB       = Path.home() / "conductor/workspaces/beatport/chennai/state/sync.db"
 
 API_ROOT = "https://api.beatport.com/v4"
 
@@ -48,14 +51,45 @@ BP_KEY_TO_CAMELOT: dict[int, str] = {
 # ── Beatport API ───────────────────────────────────────────────────────────────
 
 def _load_token() -> str | None:
-    if not CHENNAI_DB.exists():
-        return None
-    con = sqlite3.connect(str(CHENNAI_DB))
-    row = con.execute(
-        "SELECT token FROM auth_cache WHERE service='beatport'"
-    ).fetchone()
-    con.close()
-    return row[0] if row else None
+    """Return a valid Bearer token. Checks local store first, then chennai fallback."""
+    import time, base64
+
+    def _exp(token: str) -> float | None:
+        try:
+            payload = token.split()[-1].split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            return float(json.loads(base64.urlsafe_b64decode(payload))["exp"])
+        except Exception:
+            return None
+
+    # 1. Local token (written by beatport_auth.py login)
+    if _LOCAL_TOKEN_FILE.exists():
+        try:
+            data = json.loads(_LOCAL_TOKEN_FILE.read_text())
+            token = data.get("token", "")
+            exp = _exp(token)
+            if token and (exp is None or exp > time.time() + 60):
+                return token
+        except Exception:
+            pass
+
+    # 2. Chennai fallback (older tool)
+    if _CHENNAI_DB.exists():
+        try:
+            con = sqlite3.connect(str(_CHENNAI_DB))
+            row = con.execute(
+                "SELECT token FROM auth_cache WHERE service='beatport'"
+            ).fetchone()
+            con.close()
+            if row:
+                token = row[0]
+                exp = _exp(token)
+                if exp is None or exp > time.time() + 60:
+                    return token
+        except Exception:
+            pass
+
+    return None
 
 
 def _api_get(path: str, token: str) -> dict:
@@ -366,8 +400,8 @@ Examples:
 
     token = _load_token()
     if not token:
-        print("Error: No Beatport token found. Run the chennai sync tool to log in first.",
-              file=sys.stderr)
+        print("Error: No valid Beatport token found.", file=sys.stderr)
+        print("Run: uv run beatport_auth.py login", file=sys.stderr)
         sys.exit(1)
 
     for url in args.urls:
