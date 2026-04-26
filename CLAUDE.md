@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Four-script pipeline: `get_mix_info.py` extracts DJ.Studio mix data → `import_to_rekordbox.py` writes it into rekordbox → `track_db.py` maintains a SQLite metadata DB → `dj_import.py` wraps the whole flow in one command with automatic analysis detection.
+Five-script toolkit: `get_mix_info.py` extracts DJ.Studio mix data → `import_to_rekordbox.py` writes it into rekordbox → `track_db.py` maintains a SQLite metadata DB → `dj_import.py` wraps the whole flow in one command with automatic analysis detection → `beatport_analyze.py` analyses Beatport tracks for key + energy from the CLI.
 
 ## Commands
 
@@ -39,6 +39,10 @@ uv run import_to_rekordbox.py mix.json --cues-only --no-snap
 # Undo — restore rekordbox DB from an automatic pre-write backup:
 uv run import_to_rekordbox.py undo list
 uv run import_to_rekordbox.py undo restore 20260426_143200_My_Mix.db
+
+# Beatport track analysis (key + energy from CLI):
+uv run beatport_analyze.py https://www.beatport.com/track/title/12345678
+uv run beatport_analyze.py <url> --import   # also store in track_metadata.db
 
 # Setup
 uv sync

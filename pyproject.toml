@@ -4,6 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "pyrekordbox",
+    "librosa>=0.10",
+    "numpy",
 ]
 
 [dependency-groups]
