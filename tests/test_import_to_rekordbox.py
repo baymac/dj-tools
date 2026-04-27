@@ -1,12 +1,13 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from import_to_rekordbox import RekordboxImporter, _fmt_ms
+from rekordbox.importer import RekordboxImporter
+from rekordbox.display import _fmt_ms
 
 
 @pytest.fixture
 def importer():
-    with patch("import_to_rekordbox.Rekordbox6Database"):
+    with patch("rekordbox.importer.Rekordbox6Database"):
         return RekordboxImporter(dry_run=True, snap=True)
 
 
@@ -47,7 +48,8 @@ class TestSnapToBeatgrid:
         assert RekordboxImporter.snap_to_beatgrid(0, [1000.0, 2000.0, 3000.0]) == 1000
 
     def test_after_last_beat(self):
-        assert RekordboxImporter.snap_to_beatgrid(9999, [1000.0, 2000.0, 3000.0]) == 3000
+        # Cue past the last known beat: keep raw position, don't clamp to last beat
+        assert RekordboxImporter.snap_to_beatgrid(9999, [1000.0, 2000.0, 3000.0]) == 9999
 
     def test_exact_match(self):
         assert RekordboxImporter.snap_to_beatgrid(2000, [1000.0, 2000.0, 3000.0]) == 2000
@@ -59,11 +61,11 @@ class TestSnapToBeatgrid:
         assert RekordboxImporter.snap_to_beatgrid(1700, [1000.0, 2000.0]) == 2000
 
     def test_equidistant_picks_left(self):
-        # (ms - before) <= (after - ms) → picks left when tied
         assert RekordboxImporter.snap_to_beatgrid(1500, [1000.0, 2000.0]) == 1000
 
     def test_single_beat(self):
-        assert RekordboxImporter.snap_to_beatgrid(5000, [3000.0]) == 3000
+        # Past the only known beat: keep raw position
+        assert RekordboxImporter.snap_to_beatgrid(5000, [3000.0]) == 5000
 
 
 # ── has_bass_swap ─────────────────────────────────────────────────────────────
@@ -181,7 +183,6 @@ class TestPreviewTrackCues:
         assert by_letter["D"] == 60000   # (64+64) * 60000/128
 
     def test_outgoing_cue_positions(self, importer):
-        # end_beat=320, bpm=128
         track = self._track(bpm=128, end_beat=320)
         cues = importer.preview_track_cues(track, None, self._trans(duration_beats=64), False)
         by_letter = {c["letter"]: c["ms"] for c in cues}
@@ -191,7 +192,6 @@ class TestPreviewTrackCues:
         assert by_letter["H"] == 180000  # (320+64) * 60000/128
 
     def test_bass_swap_uses_effect_offset(self, importer):
-        # effect_offset=16, start_beat=64, bpm=128 → C at (64+16)*60000/128=37500
         track = self._track(bpm=128, start_beat=64)
         trans = self._trans(effects=["AE_Bass_Swap"], effect_offset=16)
         cues = importer.preview_track_cues(track, trans, None, False)
@@ -199,7 +199,6 @@ class TestPreviewTrackCues:
         assert by_letter["C"] == 37500
 
     def test_bass_swap_uses_midpoint_when_no_offset(self, importer):
-        # effect_offset=0 → midpoint = duration/2=32, C at (64+32)*60000/128=45000
         track = self._track(bpm=128, start_beat=64)
         trans = self._trans(duration_beats=64, effects=["AE_Bass_Swap"], effect_offset=0)
         cues = importer.preview_track_cues(track, trans, None, False)
@@ -214,7 +213,6 @@ class TestPreviewTrackCues:
         assert by_letter["A"] == 0
 
     def test_snapping_uses_beatgrid(self, importer):
-        # start_beat=64 → raw B=30000ms, exact match in grid
         track = self._track(bpm=128, start_beat=64)
         beat_times = [15000.0, 30000.0, 60000.0]
         cues = importer.preview_track_cues(
@@ -226,10 +224,9 @@ class TestPreviewTrackCues:
         assert by_letter["D"] == 60000
 
     def test_no_snap_ignores_beatgrid(self, importer):
-        with patch("import_to_rekordbox.Rekordbox6Database"):
+        with patch("rekordbox.importer.Rekordbox6Database"):
             no_snap_importer = RekordboxImporter(dry_run=True, snap=False)
         track = self._track(bpm=128, start_beat=64)
-        # Beat grid shifted 500ms off — should be ignored
         beat_times = [15500.0, 30500.0, 60500.0]
         cues = no_snap_importer.preview_track_cues(
             track, self._trans(duration_beats=64), None, False, beat_times_ms=beat_times

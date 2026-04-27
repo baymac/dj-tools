@@ -1,178 +1,139 @@
-# DJ Studio to Rekordbox Importer
+# DJ CLI
 
-Import mixes from DJ.Studio into rekordbox — playlists, transition metadata, and hot cue points for live performance.
-
-## Architecture
+A two-function CLI for moving DJ.Studio mixes into rekordbox and maintaining a per-track metadata database for live performance and future LLM-assisted mixing.
 
 ```
- DJ.Studio (macOS)                mix.json                    rekordbox (encrypted DB)
- ─────────────────          ─────────────────────          ───────────────────────────
- projects-table/            Tracks + BPM/Key/Artist        Playlist (mix order)
- audio-library-table.json   Transitions (beats/effects)    Tracks (created if missing)
-                            Beatport IDs                   Effects in Comment field
-         |                         |                       Hot cues A-H per track
-         v                         v                              ^
-   get_mix_info.py  ──────>  JSON file  ──────>  import_to_rekordbox.py
-                                                   Pass 1: tracks/playlist/effects
-                                                   → analyze in rekordbox →
-                                                   Pass 2 (--cues-only): snapped cues
+                                 dj_cli.py
+                                 ┌────────────────────────┐
+ DJ.Studio (macOS) ──────────►   │ migrate  ─► Rekordbox  │
+ projects-table/                 │            playlist +  │
+ audio-library-table/            │            cues + fx   │
+                                 │                        │
+ DJ.Studio library ──────────►   │ db       ─► SQLite     │
+ track-structures-table/         │            energy +    │
+ audio-library-stems/            │            sections    │
+                                 └────────────────────────┘
+
+ local-analyse/  (standalone helpers, not part of either pipeline)
+   beatport_analyze.py  — single Beatport URL → key/BPM/energy (read-only)
+   beatport_auth.py     — login / status / clear
 ```
-
-## What It Does
-
-- **Extracts** mix data from DJ.Studio's local database (tracks, order, transitions, BPM, key)
-- **Matches** tracks to rekordbox by Beatport ID; creates missing ones as streaming entries (`FileType=20`)
-- **Creates** a rekordbox playlist with tracks in mix order
-- **Writes** transition effect names into each track's Comment field
-- **Sets hot cue points** on each track, snapped to rekordbox's analyzed beatgrid for accurate placement
-
-## Hot Cue Layout
-
-Cue points follow the DJ.Studio convention so you can perform the mix on CDJs/controllers:
-
-```
-First track (5 cues):               Middle tracks (up to 8 cues):
-  A = Play start                      B = Prep (x beats before incoming transition)
-  B = Prep (x beats before out)       C = Incoming transition start
-  C = Outgoing transition start       D = Incoming bass swap (if present)
-  D = Outgoing bass swap (if any)     E = Incoming transition end
-  E = Outgoing transition end         A = Prep (x beats before outgoing transition)
-                                      F = Outgoing transition start
-Last track (up to 4 cues):           G = Outgoing bass swap (if present)
-  B/C/D/E = incoming only             H = Outgoing transition end
-```
-
-- **Prep distance (x)**: 8, 16, or 32 beats depending on transition length
-- **Bass swap cue**: only set when `AE_Bass_Swap`, `AE_Bass_SwapFade`, or `AE_Bass_CrossFade` is present
-- **Outgoing transition**: `end_beat - duration_beats` to `end_beat`
-- **Incoming transition**: `start_beat` to `start_beat + duration_beats`
 
 ## Setup
 
 ```bash
-cd /path/to/dj
 uv sync
 ```
 
-## Quick Start
+Rekordbox must be **closed** before any `migrate` write.
+
+## Function 1 — Migrate a mix into rekordbox
 
 ```bash
-# 1. List available mixes
-uv run get_mix_info.py --list
+# Full pipeline: extract DJ.Studio JSON → Pass 1 (tracks + playlist + effects)
+# → wait for rekordbox to analyze the playlist → Pass 2 (cues snapped to beatgrid)
+uv run dj_cli.py migrate "Ibiza Vibes"
 
-# 2. Export a mix to JSON
-uv run get_mix_info.py "Ibiza Vibes" -o mix.json
+# Just extract the JSON, don't touch rekordbox
+uv run dj_cli.py migrate "Ibiza Vibes" --extract-only -o mix.json
 
-# 3. Preview import (no changes)
-uv run import_to_rekordbox.py mix.json --dry-run
+# Use existing JSON, skip extraction
+uv run dj_cli.py migrate mix.json
 
-# 4. Close rekordbox, then run Pass 1 (creates tracks, playlist, effects)
-uv run import_to_rekordbox.py mix.json
+# Just Pass 1 (tracks + playlist + effects, no cues yet)
+uv run dj_cli.py migrate mix.json --pass1-only
 
-# 5. Open rekordbox and let it analyze all tracks in the playlist
+# Just Pass 2 (cues, after rekordbox finished analyzing the playlist)
+uv run dj_cli.py migrate mix.json --pass2-only
 
-# 6. Close rekordbox, then run Pass 2 (writes cues snapped to beatgrid)
-uv run import_to_rekordbox.py mix.json --cues-only
+# Pass 2 fallback for tracks without ANLZ data
+uv run dj_cli.py migrate mix.json --pass2-only --no-snap
+
+# Preview what Pass 1 would do
+uv run dj_cli.py migrate mix.json --pass1-only --dry-run
+
+# List available DJ.Studio mixes
+uv run dj_cli.py migrate --list
+
+# Restore rekordbox's master.db from an automatic pre-write backup
+uv run dj_cli.py undo list
+uv run dj_cli.py undo restore 20260427_143200_Ibiza_Vibes.db
 ```
 
-## Scripts
+### Hot cue layout
 
-### `get_mix_info.py` — Extract mix from DJ.Studio
+```
+Cue letters per track:
+  A = Prep before incoming transition
+  B = Incoming transition start
+  C = Incoming bass swap (only if a bass-swap effect is present)
+  D = Incoming transition end
 
-Reads DJ.Studio's local database and audio library cache to produce a JSON file.
+  E = Prep before outgoing transition
+  F = Outgoing transition start
+  G = Outgoing bass swap (only if present)
+  H = Outgoing transition end
+```
+
+Prep distance is genre-tuned: techno/trance = 16 bars, house/electronica = 8, DnB/trap = 4. Always capped at half the transition duration so the prep cue never collides with the previous transition's end cue.
+
+## Function 2 — Track metadata DB
+
+The SQLite DB lives at `~/Music/DJ.Studio/track_metadata.db`. Designed to feed an LLM mixing layer later.
 
 ```bash
-uv run get_mix_info.py --list                    # List all mixes
-uv run get_mix_info.py "Mix Name"                # Show mix details
-uv run get_mix_info.py "Mix Name" --json         # Output as JSON
-uv run get_mix_info.py "Mix Name" -o file.json   # Export to file
+# Seed from DJ.Studio for a specific mix (latest saved revision wins if duplicates).
+# Imports tracks + MIK key + MIK energy + stem intensities + section markers.
+uv run dj_cli.py db populate "Ibiza Vibes"
+
+# List, inspect, edit
+uv run dj_cli.py db list
+uv run dj_cli.py db show beatport-sdk_12345678
+uv run dj_cli.py db update beatport-sdk_12345678 --energy 8 --vocals high --drums high --melody low
+uv run dj_cli.py db update beatport-sdk_12345678 --notes "afters peak track, big breakdown ~3min in"
+
+# Section markers (intro / buildup / drop / breakdown / outro / bridge / verse / chorus)
+uv run dj_cli.py db section add beatport-sdk_12345678 intro 0 64
+uv run dj_cli.py db section add beatport-sdk_12345678 drop 128 256
+uv run dj_cli.py db section list beatport-sdk_12345678
+uv run dj_cli.py db section remove 5
 ```
 
-**Data sources:**
-- `~/Music/DJ.Studio/Database/projects-table/` — mix projects (track order, transitions, effects)
-- `~/Music/DJ.Studio/Cache/Database/audio-library-table.json` — track metadata (title, artist, BPM, key, cue points)
+## Local analysis helpers
 
-**Output JSON structure:**
-```json
-{
-  "metadata": { "name": "Ibiza Vibes", "track_count": 16, "bpm_min": 126, "bpm_max": 132 },
-  "tracks": [
-    { "position": 1, "title": "Pull Up", "artist": "Discip",
-      "bpm": 129, "key": "11A", "start_beat": 64, "end_beat": 480,
-      "library_key": "beatport-sdk_22866908" }
-  ],
-  "transitions": [
-    { "number": 1, "duration_beats": 64, "effect_offset": 32,
-      "effects": ["AE_CrossFade", "AE_Bass_CrossFade"] }
-  ]
-}
-```
-
-### `import_to_rekordbox.py` — Import into rekordbox DB
-
-Writes directly into rekordbox's encrypted database via pyrekordbox. Bypasses XML import (which doesn't work for Beatport streaming tracks). Uses a two-pass workflow so cue points can be snapped to rekordbox's analyzed beatgrid.
+Standalone scripts. Not part of the main pipeline. Read-only — they never write to the DB. Use them to spot-check a Beatport track before importing the mix.
 
 ```bash
-# Pass 1: tracks, playlist, effects (no cues)
-uv run import_to_rekordbox.py mix.json
-uv run import_to_rekordbox.py mix.json --dry-run
+# One-time login (Playwright headless browser captures Bearer token)
+uv run local-analyse/beatport_auth.py login
+uv run local-analyse/beatport_auth.py status
+uv run local-analyse/beatport_auth.py clear
 
-# Pass 2: cues snapped to rekordbox's beatgrid
-uv run import_to_rekordbox.py mix.json --cues-only
-uv run import_to_rekordbox.py mix.json --cues-only --dry-run
-
-# Pass 2 without snapping (fallback to raw beat positions)
-uv run import_to_rekordbox.py mix.json --cues-only --no-snap
+# Single-URL Beatport analysis: key (Krumhansl-Schmuckler chromagram), BPM (ai-beatgrid),
+# energy (spectral brightness + onset density). Prints to stdout.
+uv run local-analyse/beatport_analyze.py https://www.beatport.com/track/title/12345678
 ```
 
-**Pass 1** — create tracks and playlist:
+## Maintenance helpers
 
-1. **Match tracks** — looks up each Beatport ID via `FolderPath = /v4/catalog/tracks/{ID}/`
-2. **Create missing tracks** — as Beatport streaming entries (`FileType=20`) with artist, genre, key, BPM
-3. **Create playlist** — named after the mix
-4. **Add tracks** — in correct mix order
-5. **Write effects** — transition effect names stored in each track's Comment field
+`helpers/` holds maintenance scripts that touch rekordbox but are not part of either
+main function. The cleanup script wipes a previously imported playlist (cues +
+comments + Beatport streaming entries) so you can rerun a migration cleanly.
+Always backs up `master.db` first; aborts if the backup fails.
 
-**Pass 2** (`--cues-only`) — write cues after rekordbox analysis:
+```bash
+uv run helpers/cleanup_playlist.py --list                            # see playlists
+uv run helpers/cleanup_playlist.py "Ibiza Vibes" --dry-run           # preview
+uv run helpers/cleanup_playlist.py "Ibiza Vibes"                     # remove playlist + cues + comments
+uv run helpers/cleanup_playlist.py "Ibiza Vibes" --delete-tracks     # also delete created tracks
+```
 
-6. **Read beatgrid** — loads ANLZ files and extracts the PQTZ beat grid (times in ms)
-7. **Snap cues** — each cue position is snapped to the nearest beat in rekordbox's grid via binary search
-8. **Write hot cues** — A-H cue points based on transition positions, aligned to rekordbox's beat grid
-9. **Graceful fallback** — tracks without ANLZ data get unsnapped cues (reported as `[unsnapped]`)
+## Tests
 
-## Requirements
+```bash
+uv run pytest
+```
 
-- [uv](https://docs.astral.sh/uv/) (`brew install uv`)
-- [pyrekordbox](https://github.com/dylanljones/pyrekordbox) (installed via `uv sync`)
-- Rekordbox must be **closed** before running the import
+## Architecture
 
-## Technical Details
-
-### Beatport streaming tracks in rekordbox
-
-- `FileType = 20`, `FolderPath = /v4/catalog/tracks/{BEATPORT_ID}/`
-- `BPM` stored as integer * 100 (e.g., 129 BPM = 12900)
-- `Commnt` field (note spelling) for transition effects
-- `ExtInfo` contains `{"StreamingInfo": {"AudioQuality": "0", ...}}`
-
-### Transition mapping
-
-Transition N describes the mix between track N and track N+1:
-- Track N gets `Trans out:` effects and outgoing cue points
-- Track N+1 gets `Trans in:` effects and incoming cue points
-
-### Hot cue implementation
-
-- Cues written as `DjmdCue` entries with `Kind` 1-8 (A-H)
-- Raw positions calculated from beat data: `beat * 60000 / bpm` = milliseconds
-- In Pass 2, raw positions are snapped to the nearest beat in rekordbox's ANLZ beatgrid (PQTZ tag) using `bisect_left`
-- Existing hot cues on a track are cleared before writing new ones
-- Bass swap position uses `effect_offset` if > 0, otherwise transition midpoint
-
-### Two-pass workflow
-
-DJ.Studio and rekordbox analyze tracks independently, producing different beat grids. Cue points computed from DJ.Studio's beat positions can drift relative to rekordbox's grid. The two-pass approach fixes this:
-
-1. **Pass 1** creates tracks/playlist/effects so rekordbox can see and analyze them
-2. **Rekordbox analysis** generates ANLZ files with a PQTZ beat grid per track
-3. **Pass 2** reads those beat grids and snaps each cue to the nearest analyzed beat
+See `CLAUDE.md` for the per-module layout, key design decisions, and the rekordbox DB schema notes (FileType=20 streaming entries, BPM × 100, ANLZ PQTZ beatgrid, etc.).

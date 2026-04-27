@@ -313,10 +313,6 @@ name = "dj-chicago"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "librosa" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "playwright" },
     { name = "pyrekordbox" },
 ]
 
@@ -324,17 +320,23 @@ dependencies = [
 dev = [
     { name = "pytest" },
 ]
+local-analyse = [
+    { name = "librosa" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "playwright" },
+]
 
 [package.metadata]
-requires-dist = [
-    { name = "librosa", specifier = ">=0.10" },
-    { name = "numpy" },
-    { name = "playwright" },
-    { name = "pyrekordbox" },
-]
+requires-dist = [{ name = "pyrekordbox" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.0.3" }]
+local-analyse = [
+    { name = "librosa", specifier = ">=0.10" },
+    { name = "numpy" },
+    { name = "playwright" },
+]
 
 [[package]]
 name = "exceptiongroup"

@@ -4,12 +4,14 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "pyrekordbox",
-    "librosa>=0.10",
-    "numpy",
-    "playwright",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+]
+local-analyse = [
+    "librosa>=0.10",
+    "numpy",
+    "playwright",
 ]
