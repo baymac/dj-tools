@@ -1,5 +1,6 @@
 import pytest
-from get_mix_info import DJStudioMixExtractor
+
+from djstudio.extractor import DJStudioMixExtractor
 
 
 @pytest.fixture

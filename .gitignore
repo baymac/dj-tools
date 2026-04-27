@@ -4,3 +4,8 @@ __pycache__/
 *.json
 !package.json
 .claude/
+.beatport_token
+local-analyse/.beatport_token
+logs/
+*.log
+log.txt
