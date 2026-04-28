@@ -60,5 +60,5 @@ def print_mix_list(projects: List[Dict]) -> None:
             f"{project['genre']:<15} "
             f"{project['tracks']:<8} "
             f"{project['duration']:>6.1f}m   "
-            f"{project['modified'][:10]}"
+            f"{project['modified'][:16].replace('T', ' ')}"
         )

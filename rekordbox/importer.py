@@ -69,7 +69,6 @@ class RekordboxImporter:
         folder_path = f"/v4/catalog/tracks/{beatport_id}/"
 
         content_id = str(self.db.generate_unused_id(tables.DjmdContent))
-        file_id = str(self.db.generate_unused_id(tables.DjmdContent, id_field_name="rb_file_id"))
         content_uuid = str(uuid4())
 
         artist = self.get_or_create_artist(track_info.get("artist", "Unknown"))
@@ -96,6 +95,7 @@ class RekordboxImporter:
             title = title[:paren_start].strip()
 
         today = str(datetime.date.today())
+        analysis_data_path = self._anlz_path_for_uuid(content_uuid)
 
         content = tables.DjmdContent.create(
             ID=content_id,
@@ -128,7 +128,8 @@ class RekordboxImporter:
             DeviceID=self.device.ID,
             MasterDBID=self.device.MasterDBID,
             MasterSongID=content_id,
-            rb_file_id=file_id,
+            AnalysisDataPath=analysis_data_path,
+            rb_file_id="0",
             HotCueAutoLoad="on",
             DeliveryControl="on",
             DeliveryComment="",
@@ -207,7 +208,7 @@ class RekordboxImporter:
                         for b, t in zip(beats, times)
                         if int(b) == 1
                     )
-        except (KeyError, TypeError, ValueError, OSError, AttributeError):
+        except Exception:
             pass
         return None
 
