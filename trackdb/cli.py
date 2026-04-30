@@ -34,6 +34,12 @@ Examples:
         "mix_name",
         help="DJ Studio mix name (latest revision picked when duplicates exist)",
     )
+    populate_p.add_argument(
+        "--fetch-release-dates",
+        dest="fetch_release_dates",
+        action="store_true",
+        help="After populating, fetch release dates from Beatport for tracks that don't have one",
+    )
 
     sub.add_parser("list", help="List all tracks")
 
@@ -50,6 +56,12 @@ Examples:
     update_p.add_argument("--bpm",          type=float)
     update_p.add_argument("--notes",        help="Free-form notes")
     update_p.add_argument("--beatport-url", dest="beatport_url", help="Full Beatport track URL")
+    update_p.add_argument(
+        "--release-date",
+        dest="release_date",
+        metavar="YYYY-MM-DD",
+        help="Release date (skipped if track already has one)",
+    )
 
     section_p = sub.add_parser("section", help="Manage section markers")
     sec_sub = section_p.add_subparsers(dest="section_command")
