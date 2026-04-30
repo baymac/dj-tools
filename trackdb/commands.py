@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from typing import Optional
 
+from .beatport import fetch_release_date, load_token
 from .library import (
     beatport_url,
     camelot_key,
@@ -145,6 +146,50 @@ def cmd_populate(conn: sqlite3.Connection, args) -> None:
     suffix = f" ({'; '.join(extras)})" if extras else ""
     print(f"Populated {inserted} tracks{suffix}, {sections_added} new sections. DB: {DB_PATH}")
 
+    if getattr(args, "fetch_release_dates", False):
+        _fetch_release_dates_for_mix(conn, target_keys)
+
+
+def _fetch_release_dates_for_mix(conn: sqlite3.Connection, target_keys: set) -> None:
+    """Fetch release dates from Beatport for tracks in target_keys that lack one."""
+    token = load_token()
+    if not token:
+        print(
+            "  Skipping release date fetch — no Beatport token found.\n"
+            "  Run: uv run local-analyse/beatport_auth.py login",
+            file=sys.stderr,
+        )
+        return
+
+    rows = conn.execute(
+        "SELECT library_key, beatport_id, title, artist, release_date FROM tracks"
+        " WHERE library_key IN ({})".format(",".join("?" * len(target_keys))),
+        list(target_keys),
+    ).fetchall()
+
+    candidates = [r for r in rows if r["beatport_id"] and not r["release_date"]]
+    if not candidates:
+        print("  All tracks already have release dates — nothing to fetch.")
+        return
+
+    print(f"  Fetching release dates for {len(candidates)} tracks from Beatport API...")
+    fetched = failed = 0
+    now = datetime.datetime.now().isoformat()
+    for row in candidates:
+        date = fetch_release_date(row["beatport_id"], token)
+        if date:
+            conn.execute(
+                "UPDATE tracks SET release_date = ?, updated_at = ? WHERE library_key = ?",
+                (date, now, row["library_key"]),
+            )
+            print(f"    {row['artist']} — {row['title']}: {date}")
+            fetched += 1
+        else:
+            print(f"    {row['artist']} — {row['title']}: not found", file=sys.stderr)
+            failed += 1
+    conn.commit()
+    print(f"  Release dates: {fetched} fetched, {failed} not found.")
+
 
 def cmd_list(conn: sqlite3.Connection, args) -> None:
     rows = conn.execute("""
@@ -197,6 +242,8 @@ def cmd_show(conn: sqlite3.Connection, args) -> None:
     print(f"Vocals      : {track['vocals'] or '-'}")
     print(f"Drums       : {track['drums'] or '-'}")
     print(f"Melody      : {track['melody'] or '-'}")
+    if track["release_date"]:
+        print(f"Released    : {track['release_date']}")
     if track["notes"]:
         print(f"Notes       : {track['notes']}")
 
@@ -242,9 +289,14 @@ def cmd_update(conn: sqlite3.Connection, args) -> None:
         updates["bpm"] = args.bpm
     if args.beatport_url is not None:
         updates["beatport_url"] = args.beatport_url
+    if args.release_date is not None:
+        if track["release_date"]:
+            print(f"Skipping — track already has release_date: {track['release_date']}")
+            return
+        updates["release_date"] = args.release_date
 
     if not updates:
-        print("Nothing to update. Use --energy, --vocals, --drums, --melody, --notes, --key, --bpm, or --beatport-url")
+        print("Nothing to update. Use --energy, --vocals, --drums, --melody, --notes, --key, --bpm, --beatport-url, or --release-date")
         return
 
     updates["updated_at"] = datetime.datetime.now().isoformat()

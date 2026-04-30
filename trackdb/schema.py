@@ -45,6 +45,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             drums        TEXT CHECK(drums  IN ('none', 'low', 'medium', 'high')),
             melody       TEXT CHECK(melody IN ('none', 'low', 'medium', 'high')),
             notes        TEXT,
+            release_date TEXT,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
         );
@@ -65,9 +66,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_sections_track   ON track_sections(track_id);
         CREATE INDEX IF NOT EXISTS idx_sections_type    ON track_sections(section_type);
     """)
-    # Pre-existing DBs may not have beatport_url
-    try:
-        conn.execute("ALTER TABLE tracks ADD COLUMN beatport_url TEXT")
-    except sqlite3.OperationalError:
-        pass
+    for col, defn in [
+        ("beatport_url", "TEXT"),
+        ("release_date", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()

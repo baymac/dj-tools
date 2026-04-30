@@ -152,7 +152,7 @@ def test_cmd_update_sets_fields(db):
     args = Namespace(
         library_key="beatport-sdk_111",
         energy=9, vocals="high", drums=None, melody=None,
-        notes="great drop", key=None, bpm=None, beatport_url=None,
+        notes="great drop", key=None, bpm=None, beatport_url=None, release_date=None,
     )
     cmd_update(db, args)
 
@@ -169,7 +169,7 @@ def test_cmd_update_exits_on_bad_energy(db):
     args = Namespace(
         library_key="beatport-sdk_111",
         energy=11, vocals=None, drums=None, melody=None,
-        notes=None, key=None, bpm=None, beatport_url=None,
+        notes=None, key=None, bpm=None, beatport_url=None, release_date=None,
     )
     with pytest.raises(SystemExit):
         cmd_update(db, args)
@@ -213,3 +213,150 @@ def test_cmd_section_remove_missing_exits(db):
 
     with pytest.raises(SystemExit):
         cmd_section_remove(db, Namespace(section_id=9999))
+
+
+# ── release_date ──────────────────────────────────────────────────────────────
+
+def test_cmd_update_sets_release_date(db):
+    from trackdb.commands import cmd_update
+
+    _insert_track(db)
+    cmd_update(db, Namespace(
+        library_key="beatport-sdk_111",
+        energy=None, vocals=None, drums=None, melody=None,
+        notes=None, key=None, bpm=None, beatport_url=None,
+        release_date="2023-04-14",
+    ))
+
+    row = db.execute("SELECT release_date FROM tracks WHERE library_key = 'beatport-sdk_111'").fetchone()
+    assert row["release_date"] == "2023-04-14"
+
+
+def test_cmd_update_skips_release_date_if_already_set(db, capsys):
+    from trackdb.commands import cmd_update
+
+    _insert_track(db)
+    db.execute("UPDATE tracks SET release_date = '2020-01-01' WHERE library_key = 'beatport-sdk_111'")
+    db.commit()
+
+    cmd_update(db, Namespace(
+        library_key="beatport-sdk_111",
+        energy=None, vocals=None, drums=None, melody=None,
+        notes=None, key=None, bpm=None, beatport_url=None,
+        release_date="2023-04-14",
+    ))
+
+    row = db.execute("SELECT release_date FROM tracks WHERE library_key = 'beatport-sdk_111'").fetchone()
+    assert row["release_date"] == "2020-01-01"  # unchanged
+    assert "already has release_date" in capsys.readouterr().out
+
+
+def test_cmd_populate_fetch_release_dates(db):
+    """--fetch-release-dates fills in dates for Beatport tracks that lack one."""
+    from trackdb.commands import cmd_populate
+
+    lib_key = "beatport-sdk_999"
+    library = {
+        lib_key: {
+            "key": lib_key,
+            "tag": {"title": "Fetched Track", "artist": "DJ Y", "genre": "House"},
+            "bpm": 124.0,
+            "mikKey": None,
+            "mikEnergy": None,
+            "structureKey": lib_key,
+        }
+    }
+    project = {"name": "Mix", "lastModified": "2024-01-01T00:00:00", "key": "abc123xyz"}
+
+    with (
+        patch("trackdb.commands.load_dj_studio_library", return_value=library),
+        patch("trackdb.commands.mix_track_keys", return_value=({lib_key}, project)),
+        patch("trackdb.commands.load_dj_studio_structures", return_value={}),
+        patch("trackdb.commands.read_stem_intensities", return_value={}),
+        patch("trackdb.commands.load_token", return_value="fake-token"),
+        patch("trackdb.commands.fetch_release_date", return_value="2022-06-10"),
+    ):
+        cmd_populate(db, Namespace(mix_name="Mix", fetch_release_dates=True))
+
+    row = db.execute("SELECT release_date FROM tracks WHERE library_key = ?", (lib_key,)).fetchone()
+    assert row["release_date"] == "2022-06-10"
+
+
+def test_cmd_populate_fetch_skips_tracks_with_existing_date(db):
+    """--fetch-release-dates does not overwrite a date already in the DB."""
+    from trackdb.commands import cmd_populate
+
+    lib_key = "beatport-sdk_888"
+    _insert_track(db, library_key=lib_key)
+    db.execute("UPDATE tracks SET release_date = '2019-03-01' WHERE library_key = ?", (lib_key,))
+    db.commit()
+
+    library = {
+        lib_key: {
+            "key": lib_key,
+            "tag": {"title": "Track", "artist": "A", "genre": ""},
+            "bpm": 130.0,
+            "mikKey": None,
+            "mikEnergy": None,
+            "structureKey": lib_key,
+        }
+    }
+    project = {"name": "M", "lastModified": "2024-01-01T00:00:00", "key": "abc123xyz"}
+
+    mock_fetch = patch("trackdb.commands.fetch_release_date", return_value="2023-01-01")
+    with (
+        patch("trackdb.commands.load_dj_studio_library", return_value=library),
+        patch("trackdb.commands.mix_track_keys", return_value=({lib_key}, project)),
+        patch("trackdb.commands.load_dj_studio_structures", return_value={}),
+        patch("trackdb.commands.read_stem_intensities", return_value={}),
+        patch("trackdb.commands.load_token", return_value="fake-token"),
+        mock_fetch as mocked,
+    ):
+        cmd_populate(db, Namespace(mix_name="M", fetch_release_dates=True))
+
+    mocked.assert_not_called()
+    row = db.execute("SELECT release_date FROM tracks WHERE library_key = ?", (lib_key,)).fetchone()
+    assert row["release_date"] == "2019-03-01"  # unchanged
+
+
+def test_cmd_populate_fetch_no_token(db, capsys):
+    """--fetch-release-dates prints an error and skips when no token is available."""
+    from trackdb.commands import cmd_populate
+
+    lib_key = "beatport-sdk_777"
+    library = {
+        lib_key: {
+            "key": lib_key,
+            "tag": {"title": "T", "artist": "A", "genre": ""},
+            "bpm": 128.0,
+            "mikKey": None,
+            "mikEnergy": None,
+            "structureKey": lib_key,
+        }
+    }
+    project = {"name": "M", "lastModified": "2024-01-01T00:00:00", "key": "abc123xyz"}
+
+    with (
+        patch("trackdb.commands.load_dj_studio_library", return_value=library),
+        patch("trackdb.commands.mix_track_keys", return_value=({lib_key}, project)),
+        patch("trackdb.commands.load_dj_studio_structures", return_value={}),
+        patch("trackdb.commands.read_stem_intensities", return_value={}),
+        patch("trackdb.commands.load_token", return_value=None),
+    ):
+        cmd_populate(db, Namespace(mix_name="M", fetch_release_dates=True))
+
+    row = db.execute("SELECT release_date FROM tracks WHERE library_key = ?", (lib_key,)).fetchone()
+    assert row["release_date"] is None
+    assert "no Beatport token" in capsys.readouterr().err
+
+
+def test_release_date_column_in_schema(db):
+    """release_date column exists and accepts a date string."""
+    db.execute(
+        """INSERT INTO tracks
+               (library_key, title, artist, created_at, updated_at, release_date)
+           VALUES ('test_key', 'T', 'A', '2024-01-01', '2024-01-01', '2021-07-23')"""
+    )
+    db.commit()
+    row = db.execute("SELECT release_date FROM tracks WHERE library_key = 'test_key'").fetchone()
+    assert row["release_date"] == "2021-07-23"
