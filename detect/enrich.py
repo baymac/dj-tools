@@ -55,24 +55,27 @@ def _get_token() -> str:
             return new_token
 
     username = os.environ.get("BEATPORT_USERNAME", "").strip()
-    password = os.environ.get("BEATPORT_PASSWORD", "").strip()
-    if username and password:
-        console.print("[dim]Logging in to Beatport via browser (~30s)…[/dim]")
-        try:
-            token, session = bp_api.capture_token(username, password)
-            bp_api.save_token_to_env(token, session)
-            return token
-        except Exception:
-            pass
+    password = os.environ.get("BEATPORT_PASSWORD", "").strip() or None
+
+    console.print("[dim]Session expired — trying browser login (headless)…[/dim]")
+    try:
+        token, session = bp_api.capture_token(username or None, password, headless=True)
+        bp_api.save_token_to_env(token, session)
+        return token
+    except Exception:
+        pass
+
+    console.print("[dim]Headless login failed — opening browser window…[/dim]")
+    try:
+        token, session = bp_api.capture_token(username or None, password, headless=False)
+        bp_api.save_token_to_env(token, session)
+        return token
+    except Exception:
+        pass
 
     console.print(
-        "[red]No Beatport credentials.[/red] Set [bold]BEATPORT_ACCESS_TOKEN[/bold] "
-        "and [bold]BEATPORT_SESSION_TOKEN[/bold] in .env.\n\n"
-        "  1. Open beatport.com in a browser (logged in)\n"
-        "  2. DevTools → Network → beatport.com/api/auth/session\n"
-        "  3. Copy [bold]token.accessToken[/bold] → set as BEATPORT_ACCESS_TOKEN\n"
-        "  4. DevTools → Application → Cookies → copy [bold]__Secure-next-auth.session-token[/bold]\n"
-        "     → set as BEATPORT_SESSION_TOKEN"
+        "[red]Session expired and browser login failed.[/red]\n"
+        "Run [bold]dj login-beatport --ui[/bold] to log in interactively."
     )
     sys.exit(1)
 
