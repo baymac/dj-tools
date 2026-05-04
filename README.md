@@ -48,7 +48,9 @@ dj
 │   ├── login-mixcloud                [--username] [--password]
 │   ├── enrich                        [--dry-run] [--limit N] [--verbose] [--threshold F] [--retry-misses]
 │   ├── sync-beatport                 [--dry-run] [--limit N] [--verbose]
-│   ├── enrich-studio                 [--dry-run] [--limit N] [--verbose]
+│   ├── enrich-studio                 [--dry-run] [--limit N] [--verbose] [--test]
+│   ├── import-to-studio              [--seed N] [--limit N] [--keep-temp] [--verbose]
+│   │                                 [--table enriched_tracks|enriched_tracks_test]
 │   ├── enriched                      [-n N]
 │   ├── enrich-runs                   [-n N]
 │   └── enrich-tracks <type> <id>     [--misses]
@@ -191,14 +193,72 @@ uv run dj_cli.py detect sync-beatport --verbose
 
 #### enrich-studio — DJ Studio metadata
 
-Populates `mik_key`, `mik_nrg`, `vocals`, `drums`, `melody` from DJ Studio's audio library. Run after `enrich`. Skips tracks that already have `mik_key` set.
+Populates `mik_key`, `mik_nrg`, `vocals`, `drums`, `melody` by reading DJ Studio's `audio-library-table` + `audio-library-compressedAudioView{Vocals,Drums,Melody}`. Skips tracks that already have `mik_key` set.
+
+For tracks already analyzed by you in DJ Studio's UI, this just reads the existing data. For tracks not yet analyzed, run `import-to-studio` first to drive the analysis headlessly.
 
 ```bash
 uv run dj_cli.py detect enrich-studio
 uv run dj_cli.py detect enrich-studio --dry-run
 uv run dj_cli.py detect enrich-studio --limit 50
 uv run dj_cli.py detect enrich-studio --verbose
+uv run dj_cli.py detect enrich-studio --test         # operate on enriched_tracks_test sandbox
 ```
+
+#### import-to-studio — drive DJ Studio's analysis pipeline headlessly
+
+Path A: uses your DJ Studio account + bundled SDK to fetch full Beatport tracks, run the same MIK + ai-beatgrid + ai-stems pipeline DJ Studio uses internally, and write real DJ Studio library entries (audio-library-table + track-structures-table + 4 compressedAudioView* binaries) — no UI interaction needed.
+
+**Per track captured:**
+
+| Source | Output |
+|---|---|
+| `cf.dj.studio/mixedinkey/analyze` (via WASM features) | mikKey + secondary key + confidence, mikEnergy 1-10, EnergyLevelSegments, CuePoints |
+| `@appmachine/ai-beatgrid` (TorchScript) | precise BPM, all beat positions, downbeat |
+| `@appmachine/ai-stems` Demucs Fast | vocals/drums/bass/other separated → compressedAudioView amplitude tracks + per-stem RMS averages and peaks |
+| Computed | 8-bar phraseData, beat→phrase/energy mapping, bar-accent markers |
+| Beatport API | mix_name, label, catalog_number, ISRC, sub_genre, length_ms |
+
+**Prerequisites:**
+1. **Quit DJ Studio (Cmd+Q)** before running. Its SDK conflicts with ours on port 61894 + `.beatport/` cache locks. The command pre-flight-checks and aborts with a clear message if DJ Studio is running.
+2. Sign into Beatport via DJ Studio's UI at least once (so `~/Music/DJ.Studio/.beatport/<userId>/` has cached OAuth state). One-time.
+3. DJ Studio refresh token must be valid. If expired, open DJ Studio briefly to refresh, quit it, re-run.
+
+**`cf.dj.studio`** is DJ Studio's Cloudflare-hosted classification API. The local WASM extracts pitch/energy features; the server classifies them into a Camelot key + 1-10 energy. Same flow the desktop app uses internally — bit-identical output. Auth uses your DJ Studio account JWT (decrypted from `encryptedToken-v2.dat` and refreshed via `app-services.dj.studio`).
+
+```bash
+# First-time test on a small batch
+uv run dj_cli.py detect import-to-studio --seed 5 --limit 5 --verbose
+uv run dj_cli.py detect enrich-studio --test --verbose
+
+# Full batch (after sanity-check)
+uv run dj_cli.py detect import-to-studio --seed 100 --limit 100 --verbose
+uv run dj_cli.py detect enrich-studio --test --verbose
+```
+
+**Flags:**
+- `--seed N`: drop and recreate `enriched_tracks_test` from the N most-recently-enriched rows of `enriched_tracks`. Use once at the start.
+- `--limit N`: stop after N tracks (after `--seed`, the table still has all seeded rows; only first N are processed).
+- `--table NAME`: source table (default `enriched_tracks_test`). Use `enriched_tracks` to write straight to production.
+- `--keep-temp`: don't delete the temp dir.
+
+**Failure handling:** transient `cf.dj.studio` failures are auto-retried inside the Node helper (4 attempts, exponential backoff up to 9s). Any tracks that still fail get a second pass at the end of the batch after a 5s pause. The summary distinguishes "written / recovered on retry / permanently failed" with per-track error reasons.
+
+**Per-track timing:** ~30-50s per track on first run (SDK + model cold-start), ~25-30s steady-state. ~2GB peak memory (Demucs models). 100 tracks ≈ 50-60 minutes.
+
+**Stored in `enriched_tracks_test`:**
+
+```
+mik_key, mik_key_secondary, mik_key_confidence
+tempo_precise, duration_sec
+phrase_count, cue_points_count
+vocals_avg, drums_avg, bass_avg, melody_avg
+vocals_peak, drums_peak, bass_peak, melody_peak
+mix_name, label, catalog_number, isrc, sub_genre, length_ms
+analysis_json     -- full {key, energy.segments[], cue_points[], tempo, structure, stems}
+```
+
+When you reopen DJ Studio after running, those tracks appear in your library fully analyzed — same as if you'd added them to a mix and let DJ Studio process them.
 
 #### Viewing enriched data
 
@@ -322,6 +382,7 @@ All tables live in `~/Music/DJ.Studio/dj.db`.
 | `sessions` | `detect` | One row per unique URL scanned (youtube, mixcloud, radio, instagram, podbean). Tracks scan progress and resume position. |
 | `track_sessions` | `detect` | Junction: maps each track to the session(s) it appeared in, with timestamp position. |
 | `enriched_tracks` | `detect enrich`, `detect sync-beatport` | Beatport-matched tracks: bpm, key, genre, release_date, beatport_id, beatport_link, apple_music_url, mik_key, mik_nrg, vocals, drums, melody. |
+| `enriched_tracks_test` | `detect import-to-studio --seed`, `detect enrich-studio --test` | Sandbox copy of `enriched_tracks` plus 20+ rich-analysis columns: mik_key_secondary, mik_key_confidence, tempo_precise, duration_sec, phrase_count, cue_points_count, vocals/drums/bass/melody {avg,peak} RMS, mix_name, label, catalog_number, ISRC, sub_genre, length_ms, analysis_json. Recreated on each `--seed`. |
 | `enrich_runs` | `detect enrich` | Per-run summary: seen / found / not_found / fuzzy_miss / status. |
 | `deleted_sessions` | `detect *-delete-session` | Audit log of deleted sessions. |
 | `synced_tracks` | `sync` | Tracks synced to Beatport with outcome (added / duplicate / fuzzy_miss / no_classify). |
@@ -348,6 +409,17 @@ detect/             Track detection pipeline
   cli.py            argparse subcommands + async logic
   enrich.py         Beatport enrichment loop
   enrich_studio.py  DJ Studio enrichment (mik_key, mik_nrg, stems)
+  import_to_studio.py  Path A: drive DJ Studio's bundled SDK headlessly to
+                    fetch + analyze full Beatport tracks. Decrypts local
+                    refresh token (encryptedToken-v2.dat AES-256-CBC), exchanges
+                    for a JWT via app-services.dj.studio, drives the SDK in a
+                    Node helper, writes audio-library-table + structures + 4
+                    compressedAudioView* binaries.
+  dj_studio_sdk.js  Long-running Node helper. Loads the bundled SDK +
+                    @appmachine/ai-stems (Demucs) + @appmachine/ai-beatgrid
+                    + the MIK WASM extractor. JSON-line stdin protocol.
+                    Calls cf.dj.studio/mixedinkey/analyze for the final
+                    classifier output.
   sync_beatport.py  Pull Beatport playlist tracks into enriched_tracks
   instagram.py      Instagram media fetch
   mixcloud.py       Mixcloud download + metadata
