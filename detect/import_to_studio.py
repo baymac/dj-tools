@@ -393,42 +393,82 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         i = max(0, min(len(sorted_v) - 1, int(pct * (len(sorted_v) - 1))))
         return sorted_v[i]
 
-    drum_avgs   = [p["stems"]["drums"]["avg"]  for p in phrases_rich]
-    vocal_avgs  = [p["stems"]["vocals"]["avg"] for p in phrases_rich]
-    energies    = [p["energy"]                 for p in phrases_rich]
+    # Labels match rekordbox's phrase vocabulary:
+    #   intro, build-up, drop, chorus, bridge, verse, breakdown, outro
+    # Bridge = transitional phrase sandwiched between two chorus/drop sections.
+    # Detected in a second pass after initial labeling.
+    drum_avgs  = [p["stems"]["drums"]["avg"]  for p in phrases_rich]
+    vocal_avgs = [p["stems"]["vocals"]["avg"] for p in phrases_rich]
+    energies   = [p["energy"]                 for p in phrases_rich]
 
-    drum_high_thr = _percentile(drum_avgs, 0.66) if drum_avgs else 0
-    drum_low_thr  = _percentile(drum_avgs, 0.20) if drum_avgs else 0
-    vocal_thr     = _percentile(vocal_avgs, 0.66) if vocal_avgs else 0
-    energy_high   = max(energies) if energies else 0
-    energy_med    = _percentile(energies, 0.5) if energies else 0
+    drum_p25 = _percentile(drum_avgs, 0.25) if drum_avgs else 0
+    drum_p66 = _percentile(drum_avgs, 0.66) if drum_avgs else 0
+    vocal_p66 = _percentile(vocal_avgs, 0.66) if vocal_avgs else 0
+    energy_max = max(energies) if energies else 0
+    energy_med = _percentile(energies, 0.5) if energies else 0
 
     n_phrases = len(phrases_rich)
+    intro_zone = max(1, n_phrases // 4)
+    outro_zone = n_phrases - max(1, n_phrases // 4)
+
     for i, p in enumerate(phrases_rich):
         d = p["stems"]["drums"]["avg"]
         v = p["stems"]["vocals"]["avg"]
         e = p["energy"]
-        prev_e = phrases_rich[i - 1]["energy"] if i > 0 else e
         next_e = phrases_rich[i + 1]["energy"] if i + 1 < n_phrases else e
+        next_d = phrases_rich[i + 1]["stems"]["drums"]["avg"] if i + 1 < n_phrases else d
 
-        is_first_third = i < max(1, n_phrases // 4)
-        is_last_third  = i >= n_phrases - max(1, n_phrases // 4)
+        in_intro_zone = i < intro_zone
+        in_outro_zone = i >= outro_zone
 
-        if is_first_third and d < drum_low_thr and e < energy_med:
-            label = "intro"
-        elif is_last_third and (d < drum_low_thr or e < energy_med):
-            label = "outro"
-        elif d < drum_low_thr and not is_first_third and not is_last_third:
-            label = "breakdown"
-        elif e < next_e and next_e >= energy_high and d < drum_high_thr:
-            label = "build-up"
-        elif e >= energy_high and d >= drum_high_thr:
+        # 1. Drum stripped → structural section
+        if d < drum_p25:
+            if in_intro_zone:
+                label = "intro"
+            elif in_outro_zone:
+                label = "outro"
+            else:
+                label = "breakdown"
+        # 2. Peak: high energy + heavy drums
+        elif e >= energy_max and d >= drum_p66:
             label = "drop"
-        elif v >= vocal_thr and d >= drum_low_thr:
-            label = "vocal"
+        # 3. Build-up: this phrase is rising into a near-peak with full drums
+        elif (e < next_e or d < next_d) and (next_e >= energy_max - 0 or next_d >= drum_p66) and d < drum_p66:
+            label = "build-up"
+        # 4. Chorus: sustained high energy + heavy drums (and/or vocals)
+        elif e >= energy_med and (d >= drum_p66 or v >= vocal_p66):
+            label = "chorus"
+        # 5. Default groove: mid-energy verse (vocal or instrumental)
         else:
-            label = "main"
+            label = "verse"
         p["label"] = label
+
+    # Second pass: bridge detection. A bridge is a transitional phrase
+    # sandwiched between two chorus/drop sections — typically mid-energy,
+    # often with reduced drums vs the surrounding peaks, but not stripped
+    # like a breakdown. Re-label single-phrase or two-phrase verse runs that
+    # sit between chorus/drop neighbours.
+    PEAK_LABELS = {"chorus", "drop"}
+    i = 1
+    while i < n_phrases - 1:
+        if phrases_rich[i]["label"] != "verse":
+            i += 1
+            continue
+        # Find the run of consecutive verse phrases starting here.
+        run_end = i
+        while run_end < n_phrases and phrases_rich[run_end]["label"] == "verse":
+            run_end += 1
+        run_len = run_end - i
+        prev_label = phrases_rich[i - 1]["label"] if i > 0 else None
+        next_label = phrases_rich[run_end]["label"] if run_end < n_phrases else None
+        if (
+            run_len <= 2
+            and prev_label in PEAK_LABELS
+            and next_label in PEAK_LABELS
+        ):
+            for j in range(i, run_end):
+                phrases_rich[j]["label"] = "bridge"
+        i = run_end
 
     # Compact analysis blob for LLM consumption (full energy/cue/phrase/beat detail).
     analysis = {
