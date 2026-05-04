@@ -118,7 +118,8 @@ def main() -> None:
     print(f"[4/4] DONE  ({result['timing_ms']['total']/1000:.1f}s total: "
           f"decode={result['timing_ms']['decode']/1000:.1f}s, "
           f"wasm={result['timing_ms']['wasm']/1000:.1f}s, "
-          f"server={result['timing_ms']['server']/1000:.1f}s)")
+          f"server={result['timing_ms']['server']/1000:.1f}s, "
+          f"beatgrid={result['timing_ms'].get('beatgrid', 0)/1000:.1f}s)")
     print()
     print(f"  audio: {result['audio']['samples']} samples, "
           f"{result['audio']['duration_sec']:.2f}s")
@@ -150,6 +151,19 @@ def main() -> None:
         cp = body.get("CuePoints") or []
         print(f"    EnergyLevelSegments:    {len(ec)} segments")
         print(f"    CuePoints:              {len(cp)} points")
+
+    bg = result.get("beatgrid") or {}
+    print()
+    if bg.get("ok"):
+        print(f"  ai-beatgrid:")
+        print(f"    detected_key:    {bg.get('key')}")
+        print(f"    bpm:             {bg.get('bpm'):.3f}" if bg.get('bpm') else "    bpm: -")
+        print(f"    beat_count:      {bg.get('beat_count')}")
+        print(f"    aligned_beats:   {bg.get('aligned_beat_count')}")
+        print(f"    first/last beat: {bg.get('first_beat_time'):.3f}s → {bg.get('last_beat_time'):.3f}s"
+              if bg.get("first_beat_time") is not None else "    first/last beat: -")
+    else:
+        print(f"  ai-beatgrid: FAILED — {bg.get('error')}")
 
     stored = find_stored_metadata(audio_path)
     if stored:

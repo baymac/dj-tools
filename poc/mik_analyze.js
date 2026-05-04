@@ -17,6 +17,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const DJ_STUDIO_WASM = '/Applications/DJ.Studio.app/Contents/Resources/public/5/key-feature-extractor.js';
+const DJ_STUDIO_UNPACKED = '/Applications/DJ.Studio.app/Contents/Resources/app.asar.unpacked';
+const AI_BEATGRID_ADDON = `${DJ_STUDIO_UNPACKED}/node_modules/@appmachine/ai-beatgrid/build/Release/ai-beatgrid.node`;
+const AI_BEATGRID_MODEL = `${DJ_STUDIO_UNPACKED}/node_modules/@appmachine/ai-beatgrid/build/Release/model_fold_0.pt`;
 const ANALYZE_URL = 'https://cf.dj.studio/mixedinkey/analyze';
 const TARGET_SAMPLE_RATE = 44100;
 
@@ -207,6 +210,49 @@ async function runWasmAnalysis(samples, durationSec) {
   };
 }
 
+// ─── 3b. ai-beatgrid: BPM + beat positions + detected key ─────────────────────
+
+async function runBeatgrid(samples) {
+  // The addon expects a Float32Array of audio samples + a model path + folds count.
+  // From DJ Studio's beatgridWorker.js: addon.processAsync(samples, modelPath, folds=1)
+  // → { beats: [{time, position}], beats_aligned: [...], key: "<KeyName>" }
+  let addon;
+  try {
+    addon = require(AI_BEATGRID_ADDON);
+  } catch (e) {
+    return { ok: false, error: `ai-beatgrid addon load failed: ${e.message}` };
+  }
+  if (typeof addon.enableLogging === 'function') addon.enableLogging(false);
+
+  try {
+    const result = await addon.processAsync(samples, AI_BEATGRID_MODEL, 1);
+    const beats = (result.beats || []).map(b => ({ time: b.time, position: b.position }));
+    const aligned = (result.beats_aligned || []).map(b => ({ time: b.time, position: b.position }));
+
+    // Compute average BPM from beat intervals
+    let avgBpm = 0;
+    if (beats.length >= 2) {
+      const intervals = [];
+      for (let i = 1; i < beats.length; i++) intervals.push(beats[i].time - beats[i - 1].time);
+      const meanInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      avgBpm = 60 / meanInterval;
+    }
+    return {
+      ok: true,
+      key: result.key || null,
+      bpm: avgBpm,
+      beat_count: beats.length,
+      first_beat_time: beats.length ? beats[0].time : null,
+      last_beat_time: beats.length ? beats[beats.length - 1].time : null,
+      // Truncate the beat list in the JSON output (writer can request the full list separately).
+      beats_preview: beats.slice(0, 8),
+      aligned_beat_count: aligned.length,
+    };
+  } catch (e) {
+    return { ok: false, error: `ai-beatgrid processAsync failed: ${e.message}` };
+  }
+}
+
 // ─── 4. POST to cf.dj.studio/mixedinkey/analyze ───────────────────────────────
 
 async function callAnalyzeServer(requestObject, accessToken) {
@@ -247,9 +293,13 @@ async function callAnalyzeServer(requestObject, accessToken) {
   const serverResult = await callAnalyzeServer(wasmResult.requestObject, accessToken);
   const tServer = Date.now() - t2;
 
+  const t3 = Date.now();
+  const beatgridResult = await runBeatgrid(samples);
+  const tBeatgrid = Date.now() - t3;
+
   const out = {
     ok: serverResult.httpStatus === 200,
-    timing_ms: { decode: tDecode, wasm: tWasm, server: tServer, total: Date.now() - t0 },
+    timing_ms: { decode: tDecode, wasm: tWasm, server: tServer, beatgrid: tBeatgrid, total: Date.now() - t0 },
     audio: { samples: samples.length, duration_sec: durationSec },
     wasm: {
       tempo: wasmResult.adjustedTempo,
@@ -258,6 +308,7 @@ async function callAnalyzeServer(requestObject, accessToken) {
       beat_grid_length: wasmResult.adjustedBeatGrid.length,
       energy_segment_count: wasmResult.energySegmentCount,
     },
+    beatgrid: beatgridResult,
     server: serverResult,
   };
 
