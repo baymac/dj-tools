@@ -1,13 +1,18 @@
-"""Reddit post track list fetcher — no audio, pure text parsing."""
+"""Reddit post track list extractor — paste the post text into vi, we parse on exit."""
 
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Optional
 
-# Separators between artist and title in a track line
+from .db import DB_PATH
+
+# Separators between artist and title
 _SEP_RE = re.compile(r"\s+[-–—]\s+")
-# Labels in square brackets at end of title: "[Drumcode]" / "[ Kompakt ]"
+# Labels in square brackets at end: "[Drumcode]" / "[ Kompakt ]"
 _LABEL_RE = re.compile(r"\s*\[[^\]]{1,50}\]\s*$")
 # Reddit markdown link: [text](url) → keep text
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(https?://[^\)]+\)")
@@ -20,7 +25,6 @@ _SKIP_PREFIX_RE = re.compile(r"^[>#*_~`|]")
 
 
 def _clean_line(line: str) -> str:
-    """Expand markdown links, strip labels and leading noise."""
     line = _MD_LINK_RE.sub(r"\1", line)
     line = _POS_RE.sub("", line.strip())
     line = _LABEL_RE.sub("", line)
@@ -33,31 +37,24 @@ def _parse_line(line: str) -> Optional[dict]:
         return None
     if len(line) > 250:
         return None
-
     cleaned = _clean_line(line)
     if not cleaned:
         return None
-
     m = _SEP_RE.search(cleaned)
     if not m:
         return None
-
     artist = cleaned[: m.start()].strip()
     title = cleaned[m.end() :].strip()
-
-    # Reject implausible splits
     if not artist or not title:
         return None
     if len(artist) > 120 or len(title) > 180:
         return None
-    # Skip lines where the "artist" looks like a markdown/section header word
     if len(artist.split()) > 8:
         return None
-
     return {"artist": artist, "title": title}
 
 
-def _extract_from_text(text: str) -> list[dict]:
+def extract_from_text(text: str) -> list[dict]:
     """Parse all track lines from a block of text; deduplicate by (artist, title)."""
     tracks: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -74,70 +71,28 @@ def _extract_from_text(text: str) -> list[dict]:
     return tracks
 
 
-def fetch_post(url: str) -> dict:
+def open_editor_for_post(url: str) -> str:
     """
-    Fetch a Reddit post using Playwright (bypasses the JSON API 403 block).
-    Uses old.reddit.com for simpler, server-rendered HTML.
-    Returns: {title, selftext, subreddit, author, post_url, top_comment}
+    Create a file next to dj.db, open it in vi for the user to paste the post
+    body, and return the file contents after vi exits.
     """
-    from playwright.sync_api import sync_playwright
+    db_dir = DB_PATH.parent
+    db_dir.mkdir(parents=True, exist_ok=True)
 
-    old_url = re.sub(r"https?://(www\.)?reddit\.com", "https://old.reddit.com", url, count=1)
+    # Derive a filename from the URL slug
+    slug = url.rstrip("/").split("/")[-1] or "reddit_post"
+    slug = re.sub(r"[^a-z0-9_-]", "_", slug.lower())[:60]
+    paste_file = db_dir / f"reddit_{slug}.txt"
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            page = browser.new_page()
-            page.goto(old_url, wait_until="domcontentloaded", timeout=30_000)
+    header = (
+        f"# Paste the Reddit post body below, then save and quit (:wq)\n"
+        f"# URL: {url}\n"
+        f"# Lines like  '1. Artist - Title (Mix) [Label]'  will be extracted.\n"
+        f"# Labels in [brackets] and position numbers are stripped automatically.\n"
+        f"#\n"
+    )
+    paste_file.write_text(header)
 
-            title = (page.text_content(".top-matter .title a.title") or "").strip()
+    subprocess.run(["vi", str(paste_file)])
 
-            subreddit = ""
-            sr = page.query_selector(".subreddit")
-            if sr:
-                subreddit = (sr.text_content() or "").strip().lstrip("r/")
-
-            author = ""
-            auth = page.query_selector(".tagline .author")
-            if auth:
-                author = (auth.text_content() or "").strip()
-
-            selftext = ""
-            body = page.query_selector(".expando .usertext-body .md")
-            if body:
-                selftext = (body.inner_text() or "").strip()
-
-            # Best comment: prefer stickied/mod comment, then first substantial one
-            top_comment = ""
-            for el in page.query_selector_all(".commentarea .thing.comment")[:10]:
-                classes = el.get_attribute("class") or ""
-                body_el = el.query_selector(".usertext-body .md")
-                if not body_el:
-                    continue
-                text = (body_el.inner_text() or "").strip()
-                if "stickied" in classes or "moderator" in classes:
-                    top_comment = text
-                    break
-                if not top_comment and len(text) > 80:
-                    top_comment = text
-        finally:
-            browser.close()
-
-    return {
-        "title": title,
-        "selftext": selftext,
-        "subreddit": subreddit,
-        "author": author,
-        "post_url": url,
-        "top_comment": top_comment,
-    }
-
-
-def extract_tracks(post: dict) -> list[dict]:
-    """
-    Extract artist/title pairs from selftext then top_comment.
-    Returns the longer list (selftext usually wins for track-list posts).
-    """
-    from_self = _extract_from_text(post.get("selftext") or "")
-    from_comment = _extract_from_text(post.get("top_comment") or "")
-    return from_self if len(from_self) >= len(from_comment) else from_comment
+    return paste_file.read_text()

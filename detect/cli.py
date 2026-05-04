@@ -46,7 +46,7 @@ from .db import (
     update_session_progress,
 )
 from .parser import has_track_info, parse_tracks
-from .reddit import extract_tracks as reddit_extract_tracks, fetch_post as reddit_fetch_post
+from .reddit import extract_from_text as reddit_extract_from_text, open_editor_for_post as reddit_open_editor
 from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
 
 load_dotenv()
@@ -1166,19 +1166,22 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             if not _confirm("Scan again?", default=False):
                 sys.exit(0)
 
-        console.print(f"[dim]Fetching Reddit post…[/dim]")
-        try:
-            post = reddit_fetch_post(url)
-        except Exception as exc:
-            console.print(f"[red]Failed to fetch post:[/red] {exc}")
-            sys.exit(1)
+        # Extract subreddit from URL for display
+        sr_m = __import__("re").search(r"/r/([^/?#]+)", url)
+        subreddit = sr_m.group(1) if sr_m else "reddit"
 
-        tracks = reddit_extract_tracks(post)
+        console.print(
+            f"\n[bold]Paste the post body into vi, then save and quit (:wq).[/bold]\n"
+            f"[dim]URL: {url}[/dim]\n"
+        )
+        raw_text = reddit_open_editor(url)
+
+        tracks = reddit_extract_from_text(raw_text)
         if not tracks:
-            console.print("[yellow]No tracks found in post text.[/yellow]")
+            console.print("[yellow]No tracks found — nothing saved.[/yellow]")
             sys.exit(0)
 
-        console.print(f"\n[bold]Found {len(tracks)} track(s) in r/{post['subreddit']} — {post['title']}[/bold]\n")
+        console.print(f"\n[bold]Found {len(tracks)} track(s) from r/{subreddit}:[/bold]\n")
         t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
         t.add_column("#",      style="dim", width=4)
         t.add_column("Artist", min_width=22)
@@ -1187,10 +1190,11 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             t.add_row(str(tr["position"]), tr["artist"], tr["title"])
         console.print(t)
 
+        # Derive a title from the URL slug
+        slug = url.rstrip("/").split("/")[-1].replace("_", " ").title()
         session_id = create_session(
-            "reddit", url, post["title"],
-            uploader=post["subreddit"],
-            caption=post["selftext"][:500] if post["selftext"] else None,
+            "reddit", url, slug,
+            uploader=subreddit,
         )
         insert_tracks(tracks, source="reddit", session_id=session_id)
         end_session(session_id)
