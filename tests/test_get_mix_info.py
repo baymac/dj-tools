@@ -18,29 +18,29 @@ class TestGetCamelotKey:
     def test_na_string_returns_na(self, extractor):
         assert extractor._get_camelot_key("N/A") == "N/A"
 
-    def test_key_1(self, extractor):
-        assert extractor._get_camelot_key(1) == "8B"
+    def test_key_0(self, extractor):
+        assert extractor._get_camelot_key(0) == "8B"
 
-    def test_key_13(self, extractor):
-        assert extractor._get_camelot_key(13) == "5A"
+    def test_key_12(self, extractor):
+        assert extractor._get_camelot_key(12) == "8A"
 
     def test_max_key(self, extractor):
-        assert extractor._get_camelot_key(24) == "10A"
+        assert extractor._get_camelot_key(23) == "1A"
 
-    def test_all_minor_keys(self, extractor):
-        minor = {
-            1: "8B", 2: "3B", 3: "10B", 4: "5B", 5: "12B", 6: "7B",
-            7: "2B", 8: "9B", 9: "4B", 10: "11B", 11: "6B", 12: "1B",
+    def test_all_b_keys(self, extractor):
+        b_keys = {
+            0: "8B", 1: "3B", 2: "10B", 3: "5B", 4: "12B", 5: "7B",
+            6: "2B", 7: "9B", 8: "4B", 9: "11B", 10: "6B", 11: "1B",
         }
-        for num, expected in minor.items():
+        for num, expected in b_keys.items():
             assert extractor._get_camelot_key(num) == expected
 
-    def test_all_major_keys(self, extractor):
-        major = {
-            13: "5A", 14: "12A", 15: "7A", 16: "2A", 17: "9A", 18: "4A",
-            19: "11A", 20: "6A", 21: "1A", 22: "8A", 23: "3A", 24: "10A",
+    def test_all_a_keys(self, extractor):
+        a_keys = {
+            12: "8A", 13: "3A", 14: "10A", 15: "5A", 16: "12A", 17: "7A",
+            18: "2A", 19: "9A", 20: "4A", 21: "11A", 22: "6A", 23: "1A",
         }
-        for num, expected in major.items():
+        for num, expected in a_keys.items():
             assert extractor._get_camelot_key(num) == expected
 
     def test_unknown_key_returns_string(self, extractor):

@@ -1110,14 +1110,12 @@ Examples:
     # import-to-studio
     its_p = sub.add_parser(
         "import-to-studio",
-        help="Download Beatport previews → MIK 11 analysis → write DJ Studio library entries",
+        help="Download Beatport previews → DJ Studio analysis (key/energy/cuepoints/beatgrid) → write DJ Studio library entries",
     )
     its_p.add_argument("--table", default="enriched_tracks_test",
                        help="Source table (default: enriched_tracks_test)")
     its_p.add_argument("--limit", type=int, default=0, metavar="N",
                        help="Stop after N tracks (0 = no limit)")
-    its_p.add_argument("--timeout", type=int, default=600, metavar="S",
-                       help="MIK polling timeout in seconds (default: 600)")
     its_p.add_argument("--keep-temp", action="store_true",
                        help="Keep the temp dir of downloaded preview MP3s")
     its_p.add_argument("--verbose", "-v", action="store_true")
@@ -1658,7 +1656,6 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         run_import_to_studio(
             table=args.table,
             limit=args.limit,
-            timeout_s=args.timeout,
             keep_temp=args.keep_temp,
             verbose=args.verbose,
         )
