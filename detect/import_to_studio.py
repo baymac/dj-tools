@@ -273,6 +273,9 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
     def _sm(stem: str, field: str) -> Optional[float]:
         return (stem_metrics.get(stem) or {}).get(field)
 
+    # phrase_count would be a count of our own 8-bar groupings, not a number
+    # DJ Studio publishes anywhere — leave it None until we wire in rekordbox's
+    # PSSI phrase data (which gives a real labelled count).
     rich = {
         "mik_key_secondary": str(second_key) if second_key else None,
         "mik_key_confidence": (
@@ -280,7 +283,7 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         ),
         "tempo_precise": float(bpm) if bpm else None,
         "duration_sec": duration_sec or None,
-        "phrase_count": phrase_count,
+        "phrase_count": None,
         "cue_points_count": cue_points_count,
         "vocals_avg":  _sm("vocals", "avg_rms"),
         "drums_avg":   _sm("drums",  "avg_rms"),
@@ -292,126 +295,17 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         "melody_peak": _sm("other",  "peak_rms"),
     }
 
-    # ── Per-phrase rich detail ────────────────────────────────────────────────
-    # Decode the per-bucket stem RMS streams the Node helper sent back, then for
-    # each phrase compute time window, energy (from the energy segment that
-    # covers the phrase midpoint), per-stem avg+peak RMS, and a heuristic
-    # semantic label (intro / build-up / drop / breakdown / main / vocal / outro).
-
-    rms_pkg = result.get("stems_rms_buckets_b64") or {}
-    bucket_samples = rms_pkg.get("bucket_samples") or 1024
-    sample_rate    = rms_pkg.get("sample_rate")    or 44100
-
-    def _decode_buckets(b64: Optional[str]):
-        if not b64:
-            return []
-        # Each bucket is uint16 LE — same encoding as DJ Studio's compressed view amplitude byte.
-        raw = base64.b64decode(b64)
-        n = len(raw) // 2
-        # Convert back to floats in 0..1 (Node multiplied by 65535 before quantising).
-        return [int.from_bytes(raw[i*2:(i+1)*2], "little") / 65535.0 for i in range(n)]
-
-    rms_streams = {
-        "vocals": _decode_buckets(rms_pkg.get("vocals")),
-        "drums":  _decode_buckets(rms_pkg.get("drums")),
-        "bass":   _decode_buckets(rms_pkg.get("bass")),
-        "other":  _decode_buckets(rms_pkg.get("other")),
-    }
-
-    bucket_seconds = bucket_samples / sample_rate  # ~0.0232s per bucket at 44.1k/1024
-
-    def _phrase_time_window(phrase_nr: int, beat_length: int = 32) -> tuple[float, float]:
-        """First and last beat times for the phrase. End is extrapolated by
-        one beat-period if we don't have the next beat."""
-        # Per beat_data: each beat carries phraseNr.
-        ix_start = next((i for i, b in enumerate(beat_data) if b["phraseNr"] == phrase_nr), None)
-        if ix_start is None:
-            return 0.0, 0.0
-        ix_last = ix_start
-        for i in range(ix_start, len(beat_data)):
-            if beat_data[i]["phraseNr"] != phrase_nr:
-                break
-            ix_last = i
-        start_t = beat_data[ix_start]["time"]
-        # End time = last beat's time + 1 beat period (use the median spacing as fallback).
-        next_beat = beat_data[ix_last + 1]["time"] if ix_last + 1 < len(beat_data) else None
-        if next_beat is None and bpm:
-            end_t = beat_data[ix_last]["time"] + 60.0 / bpm
-        else:
-            end_t = next_beat or beat_data[ix_last]["time"]
-        return float(start_t), float(end_t)
-
-    def _stem_window_stats(stream: list[float], start_sec: float, end_sec: float) -> tuple[float, float]:
-        """Return (avg, peak) for a stem in [start_sec, end_sec]."""
-        if not stream:
-            return 0.0, 0.0
-        s = max(0, int(start_sec / bucket_seconds))
-        e = max(s + 1, min(len(stream), int(end_sec / bucket_seconds)))
-        chunk = stream[s:e]
-        if not chunk:
-            return 0.0, 0.0
-        return sum(chunk) / len(chunk), max(chunk)
-
-    def _energy_for_window(start_sec: float, end_sec: float) -> int:
-        mid = (start_sec + end_sec) / 2
-        for s in energy_level_segments:
-            if s["startTime"] <= mid < s["endTime"]:
-                return int(s["mikEnergy"]) or int(s.get("label") or 0) or mik_nrg_int
-        return mik_nrg_int
-
-    # Build per-phrase entries with all the rich fields.
-    phrases_rich: list[dict] = []
-    for p_nr in range(phrase_count):
-        start_sec, end_sec = _phrase_time_window(p_nr)
-        if end_sec <= start_sec:
-            continue
-        v_avg, v_peak = _stem_window_stats(rms_streams["vocals"], start_sec, end_sec)
-        d_avg, d_peak = _stem_window_stats(rms_streams["drums"],  start_sec, end_sec)
-        b_avg, b_peak = _stem_window_stats(rms_streams["bass"],   start_sec, end_sec)
-        m_avg, m_peak = _stem_window_stats(rms_streams["other"],  start_sec, end_sec)
-        beats_in_phrase = sum(1 for bd in beat_data if bd["phraseNr"] == p_nr)
-        phrases_rich.append({
-            "nr": p_nr,
-            "start_sec": round(start_sec, 3),
-            "end_sec": round(end_sec, 3),
-            "duration_sec": round(end_sec - start_sec, 3),
-            "beat_length": beats_in_phrase,
-            "energy": _energy_for_window(start_sec, end_sec),
-            "stems": {
-                "vocals": {"avg": round(v_avg, 5), "peak": round(v_peak, 5)},
-                "drums":  {"avg": round(d_avg, 5), "peak": round(d_peak, 5)},
-                "bass":   {"avg": round(b_avg, 5), "peak": round(b_peak, 5)},
-                "melody": {"avg": round(m_avg, 5), "peak": round(m_peak, 5)},
-            },
-        })
-
-    # Track-wide percentiles for thresholding the semantic label.
-    def _percentile(values: list[float], pct: float) -> float:
-        if not values:
-            return 0.0
-        sorted_v = sorted(values)
-        i = max(0, min(len(sorted_v) - 1, int(pct * (len(sorted_v) - 1))))
-        return sorted_v[i]
-
-    # No semantic phrase labels: DJ Studio doesn't produce them (its renderer
-    # doesn't call the phrase ML model and real audio-library entries store
-    # phraseData=[] empty). We won't invent them — heuristic guesses got the
-    # ordering wrong (e.g. labelling a beat-from-bar-1 opener as "chorus"
-    # when it's really an intro). The factual fields (start/end/energy/stems)
-    # are kept; semantic labels are out of scope until we wire in rekordbox's
-    # phrase analysis (PSSI tags in ANLZ files) — see TODO below.
+    # No per-phrase array. DJ Studio doesn't produce one (its renderer never
+    # calls the phrase ML model; real audio-library-table entries we examined
+    # have phraseData=[] empty), and we refuse to invent labels or per-phrase
+    # stem stats by sliding our own windows over the audio.
     #
-    # TODO: pull semantic labels from rekordbox's PSSI tags when the track
-    # has been analyzed in rekordbox. Reader would parse the binary ANLZ
-    # `.DAT` (or `.EXT`) file under `<rekordbox-share>/PIONEER/USBANLZ/.../<track>`
-    # and extract the PSSI section: per phrase {type, start_beat, length} where
-    # `type` maps to rekordbox's labelled phrase set (Mood1/2/3 — Intro, Verse,
-    # Pre-Chorus, Chorus, Bridge, Outro / Drop / Up). Only works for tracks
-    # already imported AND analyzed in rekordbox; not feasible for new
-    # Beatport-streaming tracks without first round-tripping them through
-    # rekordbox's library.
+    # TODO: when we wire up rekordbox's PSSI phrase tags, those carry real
+    # labelled boundaries (Intro / Verse / Pre-Chorus / Chorus / Bridge / Outro
+    # — or Mood-3 EDM variant Intro/Up/Down/Chorus/Drop/Outro). Only works for
+    # tracks already imported AND analyzed in rekordbox.
 
-    # Compact analysis blob for LLM consumption (full energy/cue/phrase/beat detail).
+    # Compact analysis blob for LLM consumption.
     analysis = {
         "version": 1,
         "key": {
@@ -449,8 +343,6 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         },
         "structure": {
             "beats": len(beats),
-            "phrases": phrase_count,
-            "bars_per_phrase": 8,
             "first_downbeat_beat_ix": first_downbeat_ix,
         },
         "stems": {
@@ -460,7 +352,6 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
             }
             for stem in ("vocals", "drums", "bass", "other")
         },
-        "phrases": phrases_rich,
     }
 
     return {

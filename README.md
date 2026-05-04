@@ -51,6 +51,8 @@ dj
 │   ├── enrich-studio                 [--dry-run] [--limit N] [--verbose] [--test]
 │   ├── import-to-studio              [--seed N] [--limit N] [--keep-temp] [--verbose]
 │   │                                 [--table enriched_tracks|enriched_tracks_test]
+│   ├── export-to-rekordbox           [--table enriched_tracks|enriched_tracks_test]
+│   │                                 [--playlist NAME] [--limit N] [--dry-run]
 │   ├── enriched                      [-n N]
 │   ├── enrich-runs                   [-n N]
 │   └── enrich-tracks <type> <id>     [--misses]
@@ -250,15 +252,46 @@ uv run dj_cli.py detect enrich-studio --test --verbose
 
 ```
 mik_key, mik_key_secondary, mik_key_confidence
-tempo_precise, duration_sec
-phrase_count, cue_points_count
+tempo_precise, duration_sec, cue_points_count
 vocals_avg, drums_avg, bass_avg, melody_avg
 vocals_peak, drums_peak, bass_peak, melody_peak
 mix_name, label, catalog_number, isrc, sub_genre, length_ms
-analysis_json     -- full {key, energy.segments[], cue_points[], tempo, structure, stems}
+analysis_json     -- {key, energy.segments[], cue_points[], tempo, structure, stems}
 ```
 
+Every field comes directly from DJ Studio's own outputs:
+
+| Field | Source |
+|---|---|
+| `mik_key`, `mik_key_secondary`, `mik_key_confidence`, `mik_nrg` | `cf.dj.studio/mixedinkey/analyze` (DJ Studio's classifier) |
+| `analysis_json.energy.segments[]`, `cue_points[]` | `cf.dj.studio` |
+| `tempo_precise`, beat positions | `@appmachine/ai-beatgrid` (DJ Studio's bundled TorchScript model) |
+| `duration_sec`, sample rate, channel count | DJ Studio SDK `getTrackAudioInformation` |
+| `vocals/drums/bass/melody` (categorical low/medium/high) | `enrich-studio` reading DJ Studio's `compressedAudioView*` files |
+| `vocals_avg/peak`, `drums_avg/peak`, etc. (floats) | RMS over `@appmachine/ai-stems` Demucs output (same source as DJ Studio's compressedAudioView amplitude) |
+| `mix_name`, `label`, `catalog_number`, `isrc`, `sub_genre`, `length_ms` | Beatport API track-detail (`/v4/catalog/tracks/{id}/`) |
+
+**Not stored** (intentionally): semantic phrase labels (intro/chorus/breakdown/etc.). DJ Studio doesn't produce those — its renderer never calls the dormant ML phrase model and real `track-structures-table.phraseData` arrays are empty. Use `export-to-rekordbox` (below) and let rekordbox produce the labels.
+
 When you reopen DJ Studio after running, those tracks appear in your library fully analyzed — same as if you'd added them to a mix and let DJ Studio process them.
+
+#### export-to-rekordbox — push enriched tracks into a rekordbox playlist for manual phrase analysis
+
+Adds your enriched tracks to a rekordbox playlist as Beatport streaming entries (`FileType=20`, same kind rekordbox creates when you drag a Beatport track from its in-app browser). After this, open rekordbox manually and right-click → **Analyze Tracks** on the playlist; rekordbox will produce ANLZ files containing PSSI phrase tags (Intro / Verse / Pre-Chorus / Chorus / Bridge / Outro, or Mood-3 EDM Intro / Up / Down / Chorus / Drop / Outro).
+
+A future reader will pull those PSSI tags back into a separate column on `enriched_tracks_test` so we get rekordbox-quality phrase labels without ever inventing our own.
+
+**Prerequisite:** rekordbox MUST be quit before running (it locks `master.db` while open). Pre-flight check aborts with a clear message if it's running.
+
+```bash
+# Sanity-check what would be added
+uv run dj_cli.py detect export-to-rekordbox --table enriched_tracks_test --limit 5 --dry-run
+
+# Real run (rekordbox quit)
+uv run dj_cli.py detect export-to-rekordbox --table enriched_tracks_test --playlist "DJ Tools - Enrich"
+```
+
+Backs up `master.db` automatically before any write (lives at `<rekordbox-share>/claude-backups/`). Use `dj undo restore <backup>` to roll back.
 
 #### Viewing enriched data
 

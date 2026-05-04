@@ -436,14 +436,6 @@ async function analyzeTrack(beatportId, accessJwt) {
       bass:   compressed.bass.compressed_b64,
       other:  compressed.other.compressed_b64,
     },
-    stems_rms_buckets_b64: {
-      vocals: compressed.vocals.rms_per_bucket_b64,
-      drums:  compressed.drums.rms_per_bucket_b64,
-      bass:   compressed.bass.rms_per_bucket_b64,
-      other:  compressed.other.rms_per_bucket_b64,
-      bucket_samples: BUCKET_SAMPLES,
-      sample_rate: TARGET_SR,
-    },
     stem_metrics,
     stems_process_time_ms: stems.process_time_ms,
   };
