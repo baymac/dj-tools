@@ -12,6 +12,8 @@ import tempfile
 import time
 import warnings
 
+from caffeinate import caffeinate
+
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
 from pathlib import Path
@@ -1283,8 +1285,9 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         if args.capture >= args.interval:
             console.print(f"[red]--capture ({args.capture}s) must be shorter than --interval ({args.interval}s)[/red]")
             sys.exit(1)
-        asyncio.run(_run_radio(args.url, interval=args.interval, capture_s=args.capture,
-                               duration_min=args.duration, cooldown=args.cooldown))
+        with caffeinate():
+            asyncio.run(_run_radio(args.url, interval=args.interval, capture_s=args.capture,
+                                   duration_min=args.duration, cooldown=args.cooldown))
 
     elif cmd == "mixcloud":
         if args.capture >= args.interval:

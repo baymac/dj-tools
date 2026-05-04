@@ -23,7 +23,6 @@ Caller then runs: `dj detect enrich-studio --test`.
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
 import json
 import shutil
@@ -47,6 +46,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from caffeinate import caffeinate
 from detect import db as detect_db
 
 console = Console()
@@ -612,16 +612,6 @@ class SdkHelper:
 
 # ── 5. Top-level runner ───────────────────────────────────────────────────────
 
-@contextlib.contextmanager
-def _caffeinate():
-    proc = subprocess.Popen(["caffeinate", "-i"], close_fds=True)
-    try:
-        yield
-    finally:
-        proc.terminate()
-        proc.wait()
-
-
 def run_import_to_studio(
     *,
     limit: int = 0,
@@ -629,7 +619,7 @@ def run_import_to_studio(
     force: bool = False,
 ) -> None:
     from paths import command_logger
-    with command_logger("import-to-studio", console) as log_path, _caffeinate():
+    with command_logger("import-to-studio", console) as log_path, caffeinate():
         console.print(f"[dim]Log: {log_path}[/dim]")
         _run_import_to_studio_impl(limit=limit, verbose=verbose, force=force)
 
