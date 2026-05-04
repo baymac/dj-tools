@@ -188,6 +188,31 @@ def test_upsert_enriched_stores_artist_title(tmp_db):
     assert rows[0]["title"] == "Baby"
 
 
+def test_upsert_enriched_deduplicates_by_beatport_id(tmp_db):
+    """Second detected_track pointing at the same beatport_id gets outcome='duplicate'."""
+    sid1 = db.create_session("youtube", "https://yt.com/v=dup1", "D1")
+    tid1 = db.insert_track({"artist": "Bicep", "title": "Glue", "shazam_key": "SKDUP1"},
+                           source="youtube", session_id=sid1)
+    db.upsert_enriched(tid1, {"beatport_id": 9999, "beatport_link": "https://bp.com/t/glue/9999"})
+
+    # Same track detected again via Reddit (no shazam_key → new detected_tracks row)
+    sid2 = db.create_session("reddit", "https://reddit.com/r/test/1", "R")
+    tid2 = db.insert_track({"artist": "Bicep", "title": "Glue"},
+                           source="reddit", session_id=sid2)
+    db.upsert_enriched(tid2, {"beatport_id": 9999, "beatport_link": "https://bp.com/t/glue/9999"})
+
+    # enriched_tracks must have exactly one row for beatport_id 9999
+    import sqlite3
+    con = sqlite3.connect(tmp_db)
+    rows = con.execute("SELECT * FROM enriched_tracks WHERE beatport_id = 9999").fetchall()
+    con.close()
+    assert len(rows) == 1
+
+    # The reddit detected_track should be marked duplicate, not re-queued
+    unenriched = db.get_unenriched_tracks()
+    assert all(r["id"] != tid2 for r in unenriched)
+
+
 def test_mark_enrich_miss(tmp_db):
     sid = db.create_session("youtube", "https://yt.com/v=miss", "Miss")
     tid = db.insert_track({"artist": "Unknown", "title": "Unknown", "shazam_key": "SKMISS"},

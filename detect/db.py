@@ -382,6 +382,21 @@ def list_enriched_tracks(limit: int = 50, playlist_name: str | None = None) -> l
 
 def upsert_enriched(detected_track_id: int, meta: dict) -> None:
     with _connect() as con:
+        # If this beatport_id is already enriched via a different detected_track,
+        # mark this one as a duplicate and skip — keeps enriched_tracks deduplicated.
+        beatport_id = meta.get("beatport_id")
+        if beatport_id:
+            existing = con.execute(
+                "SELECT id FROM enriched_tracks WHERE beatport_id = ? AND detected_track_id != ?",
+                (beatport_id, detected_track_id),
+            ).fetchone()
+            if existing:
+                con.execute(
+                    "UPDATE detected_tracks SET enrich_outcome = 'duplicate' WHERE id = ?",
+                    (detected_track_id,),
+                )
+                return
+
         row = con.execute(
             "SELECT artist, title, apple_music_url FROM detected_tracks WHERE id = ?",
             (detected_track_id,),
