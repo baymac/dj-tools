@@ -1,49 +1,55 @@
 #!/usr/bin/env python3
-"""DJ CLI — two functions:
+"""DJ CLI — unified tool:
 
-  dj migrate ...   DJ Studio mix → Rekordbox (extract + Pass 1 + watch + Pass 2)
-  dj db ...        DJ Studio library → SQLite metadata DB (energy/intensity/sections)
+  dj export-studio ...   DJ Studio mix → Rekordbox
+  dj detect ...          Detect tracks from Instagram/radio/Mixcloud/YouTube/Podbean
+  dj sync ...            Sync Apple Music → Beatport playlists
 
-Run `uv run dj_cli.py migrate --help` or `uv run dj_cli.py db --help` for details.
+Run `uv run dj_cli.py <command> --help` for details.
 """
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
+from typing import Optional
+
+warnings.filterwarnings("ignore", message=".*audioop.*", category=DeprecationWarning)
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 from djstudio.display import print_mix_list
 from djstudio.extractor import DJStudioMixExtractor
 from pipeline import run_full_pipeline
-from rekordbox.backup import undo_list, undo_restore
-from trackdb.cli import add_db_subparser, dispatch as dispatch_db
+from detect.cli import add_detect_subparser, dispatch as dispatch_detect
+from sync.cli import add_sync_subparser, dispatch as dispatch_sync
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dj_cli.py",
-        description="DJ Studio → Rekordbox migrator + track metadata DB",
+        description="DJ Studio → Rekordbox exporter + track detection + Apple Music sync",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  uv run dj_cli.py migrate "Ibiza Vibes"            Full pipeline (extract + Pass 1 + watch + Pass 2)
-  uv run dj_cli.py migrate "Ibiza Vibes" --extract-only -o mix.json
-  uv run dj_cli.py migrate mix.json                 Use existing JSON (Pass 1 + watch + Pass 2)
-  uv run dj_cli.py migrate mix.json --pass1-only --dry-run
-  uv run dj_cli.py migrate mix.json --pass2-only
-  uv run dj_cli.py migrate --list                   List available DJ Studio mixes
-  uv run dj_cli.py undo list
-  uv run dj_cli.py undo restore 20260427_143200_My_Mix.db
+  uv run dj_cli.py export-studio "Ibiza Vibes"
+  uv run dj_cli.py export-studio mix.json --pass2-only
+  uv run dj_cli.py export-studio --list
 
-  uv run dj_cli.py db populate
-  uv run dj_cli.py db list
-  uv run dj_cli.py db show beatport-sdk_12345678
+  uv run dj_cli.py detect instagram https://www.instagram.com/p/abc123/
+  uv run dj_cli.py detect mixcloud https://www.mixcloud.com/djname/mixname/
+  uv run dj_cli.py detect history
+  uv run dj_cli.py detect enrich --dry-run
+
+  uv run dj_cli.py sync music-beatport sync --library
 """,
     )
     sub = parser.add_subparsers(dest="command")
 
-    # ── migrate ──────────────────────────────────────────────────────────────
+    # ── export-studio ────────────────────────────────────────────────────────
     migrate_p = sub.add_parser(
-        "migrate",
+        "export-studio",
         help="DJ Studio mix → Rekordbox",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -62,17 +68,24 @@ Examples:
     migrate_p.add_argument("--no-snap", action="store_true",
                            help="Pass 2: skip beatgrid snapping (use raw beat positions)")
 
-    # ── db ───────────────────────────────────────────────────────────────────
-    db_p = add_db_subparser(sub)
+    # ── detect ────────────────────────────────────────────────────────────────
+    detect_p = add_detect_subparser(sub)
 
-    # ── undo (top-level) ─────────────────────────────────────────────────────
-    undo_p = sub.add_parser("undo", help="List or restore from rekordbox DB backups")
-    undo_sub = undo_p.add_subparsers(dest="undo_command")
-    undo_sub.add_parser("list", help="List available backups")
-    undo_restore_p = undo_sub.add_parser("restore", help="Restore from a backup")
-    undo_restore_p.add_argument("backup", help="Backup filename (from 'undo list')")
+    # ── sync ──────────────────────────────────────────────────────────────────
+    sync_p = add_sync_subparser(sub)
 
-    return parser, migrate_p, db_p, undo_p
+    # ── login-beatport ────────────────────────────────────────────────────────
+    lb_p = sub.add_parser(
+        "login-beatport",
+        help="Fetch a fresh Beatport token and save it to .env",
+    )
+    mode = lb_p.add_mutually_exclusive_group()
+    mode.add_argument("--ui", action="store_true",
+                      help="Browser login with visible window (use if headless is blocked by Cloudflare)")
+    mode.add_argument("--cookie", action="store_true",
+                      help="Refresh via BEATPORT_SESSION_TOKEN cookie")
+
+    return parser, migrate_p, detect_p, sync_p, lb_p
 
 
 def _handle_migrate(args, migrate_p: argparse.ArgumentParser) -> int:
@@ -98,22 +111,80 @@ def _handle_migrate(args, migrate_p: argparse.ArgumentParser) -> int:
     )
 
 
+def _handle_login_beatport(args) -> None:
+    from connections import beatport as bp_api
+    from rich.console import Console
+    console = Console()
+
+    def _save_and_report(token: str, session: Optional[str] = None) -> None:
+        bp_api.save_token_to_env(token, session)
+        import os; os.environ["BEATPORT_ACCESS_TOKEN"] = token.removeprefix("Bearer ").strip()
+        extra = " + session cookie" if session else ""
+        console.print(f"[green]Token{extra} saved to .env[/green] — expires in ~10 min, session cookie will auto-refresh.")
+
+    # If no explicit mode flag, check if current token is still valid — skip refresh if so
+    if not args.ui and not args.cookie:
+        import os, time as _t
+        current = os.environ.get("BEATPORT_ACCESS_TOKEN", "").strip()
+        if current:
+            if not current.startswith("Bearer "):
+                current = f"Bearer {current}"
+            remaining = int(bp_api._jwt_payload(current).get("exp", 0) - _t.time())
+            if remaining > 0:
+                console.print(f"[green]Token still valid[/green] — expires in {remaining}s. Use --cookie or --ui to force refresh.")
+                return
+
+    # --cookie: session cookie refresh
+    if args.cookie:
+        session_cookie = __import__("os").environ.get("BEATPORT_SESSION_TOKEN", "").strip()
+        if not session_cookie:
+            console.print("[red]BEATPORT_SESSION_TOKEN not set in .env[/red]")
+            sys.exit(1)
+        token = bp_api.refresh_via_session(session_cookie)
+        if not token:
+            console.print("[red]Session cookie refresh failed — cookie may be expired.[/red]")
+            sys.exit(1)
+        _save_and_report(token)
+        return
+
+    # --ui or headless: browser login
+    if args.ui or not args.cookie:
+        import os as _os
+        username = _os.environ.get("BEATPORT_USERNAME", "").strip() or None
+        password = _os.environ.get("BEATPORT_PASSWORD", "").strip() or None
+
+        # auto-detect: if no --ui and session cookie is available, try cookie first
+        if not args.ui:
+            session_cookie = _os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
+            if session_cookie:
+                token = bp_api.refresh_via_session(session_cookie)
+                if token:
+                    _save_and_report(token)
+                    return
+                console.print("[yellow]Session cookie refresh failed — falling back to browser login…[/yellow]")
+
+        headless = not args.ui
+        console.print(f"[dim]Opening {'visible' if not headless else 'headless'} browser to grab Beatport session…[/dim]")
+        try:
+            token, session = bp_api.capture_token(username, password, headless=headless)
+        except RuntimeError as e:
+            console.print(f"[red]Login failed:[/red] {e}")
+            sys.exit(1)
+        _save_and_report(token, session)
+
+
 def main() -> None:
-    parser, migrate_p, db_p, undo_p = _build_parser()
+    parser, migrate_p, detect_p, sync_p, lb_p = _build_parser()
     args = parser.parse_args()
 
-    if args.command == "migrate":
+    if args.command == "export-studio":
         sys.exit(_handle_migrate(args, migrate_p))
-    elif args.command == "db":
-        dispatch_db(args, db_p)
-    elif args.command == "undo":
-        cmd = getattr(args, "undo_command", None)
-        if cmd == "list":
-            undo_list()
-        elif cmd == "restore":
-            undo_restore(args.backup)
-        else:
-            undo_p.print_help()
+    elif args.command == "detect":
+        dispatch_detect(args, detect_p)
+    elif args.command == "sync":
+        dispatch_sync(args, sync_p)
+    elif args.command == "login-beatport":
+        _handle_login_beatport(args)
     else:
         parser.print_help()
 

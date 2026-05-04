@@ -9,3 +9,4 @@ local-analyse/.beatport_token
 logs/
 *.log
 log.txt
+.DS_Store
