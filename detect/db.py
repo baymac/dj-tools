@@ -292,7 +292,10 @@ def insert_tracks(
 def list_tracks(limit: int = 50) -> list[sqlite3.Row]:
     with _connect() as con:
         return con.execute(
-            "SELECT * FROM detected_tracks ORDER BY synced_at DESC LIMIT ?", (limit,)
+            """SELECT * FROM detected_tracks
+               WHERE enrich_outcome IS NULL OR enrich_outcome != 'duplicate'
+               ORDER BY synced_at DESC LIMIT ?""",
+            (limit,),
         ).fetchall()
 
 
@@ -309,20 +312,38 @@ def tracks_for_session(session_id: int) -> list[sqlite3.Row]:
 
 
 def tracks_for_session_enriched(session_id: int) -> list[sqlite3.Row]:
-    """Enriched tracks for a session; position and apple_music_url included."""
+    """All tracks for a session with enrichment data where available.
+
+    Duplicate-outcome tracks (same beatport_id found via a different detected_track)
+    are resolved by falling back to an artist+title match in enriched_tracks so the
+    full BPM/key/etc. are still returned.
+    """
     with _connect() as con:
         return con.execute(
-            """SELECT d.id, ts.position,
-                      COALESCE(e.artist, d.artist) AS artist,
-                      COALESCE(e.title, d.title) AS title,
-                      COALESCE(e.apple_music_url, d.apple_music_url) AS apple_music_url,
-                      d.enrich_outcome,
-                      e.beatport_id, e.beatport_link, e.bpm, e.key, e.genre,
-                      e.release_date, e.mik_key, e.mik_nrg,
-                      e.vocals, e.drums, e.melody
+            """SELECT d.id, ts.position, d.enrich_outcome,
+                      COALESCE(ed.artist, ei.artist, d.artist) AS artist,
+                      COALESCE(ed.title,  ei.title,  d.title)  AS title,
+                      COALESCE(ed.apple_music_url, d.apple_music_url) AS apple_music_url,
+                      COALESCE(ed.beatport_id,   ei.beatport_id)   AS beatport_id,
+                      COALESCE(ed.beatport_link, ei.beatport_link) AS beatport_link,
+                      COALESCE(ed.bpm,           ei.bpm)           AS bpm,
+                      COALESCE(ed.key,           ei.key)           AS key,
+                      COALESCE(ed.genre,         ei.genre)         AS genre,
+                      COALESCE(ed.release_date,  ei.release_date)  AS release_date,
+                      COALESCE(ed.mik_key,       ei.mik_key)       AS mik_key,
+                      COALESCE(ed.mik_nrg,       ei.mik_nrg)       AS mik_nrg,
+                      COALESCE(ed.vocals,        ei.vocals)        AS vocals,
+                      COALESCE(ed.drums,         ei.drums)         AS drums,
+                      COALESCE(ed.melody,        ei.melody)        AS melody
                FROM detected_tracks d
                JOIN track_sessions ts ON ts.track_id = d.id
-               JOIN enriched_tracks e ON e.detected_track_id = d.id
+               LEFT JOIN enriched_tracks ed ON ed.detected_track_id = d.id
+               LEFT JOIN enriched_tracks ei ON ei.id = (
+                   SELECT e2.id FROM enriched_tracks e2
+                   WHERE LOWER(e2.artist) = LOWER(d.artist)
+                     AND LOWER(e2.title)  = LOWER(d.title)
+                   LIMIT 1
+               )
                WHERE ts.session_id = ?
                ORDER BY ts.position, d.id""",
             (session_id,),

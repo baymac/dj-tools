@@ -1132,13 +1132,11 @@ Examples:
     # enrich-tracks
     st_p = sub.add_parser(
         "enrich-tracks",
-        help="Show detected tracks + enrichment status for a session",
+        help="Show all tracks for a session with enrichment data (fuzzy_miss flagged with ~)",
     )
     st_p.add_argument("type", choices=_TYPES, metavar="TYPE",
                       help=f"Source type: {', '.join(_TYPES)}")  # _TYPES defined above
     st_p.add_argument("session_id", type=int)
-    st_p.add_argument("--misses", action="store_true",
-                      help="Show only tracks with not_found or fuzzy_miss outcome")
 
     return detect_p
 
@@ -1734,48 +1732,34 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                 return "—"
             return f"#{pos}" if session_type in ("instagram", "reddit") else _fmt_time(pos)
 
-        if args.misses:
-            all_rows = tracks_for_session(args.session_id)
-            rows = [r for r in all_rows if r["enrich_outcome"] in ("not_found", "fuzzy_miss")]
-            if not rows:
-                console.print(f"[dim]No misses for {args.type} session #{args.session_id}.[/dim]")
-                return
-            t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
-            t.add_column("Time",    style="dim", width=8)
-            t.add_column("Artist",  min_width=22)
-            t.add_column("Title",   min_width=26)
-            t.add_column("Outcome", style="yellow", width=12)
-            for r in rows:
-                t.add_row(_pos_str(r["position"]), r["artist"] or "—",
-                          r["title"] or "—", r["enrich_outcome"] or "—")
-            console.print(t)
-            console.print(f"\n[dim]{len(rows)} missed tracks[/dim]")
-        else:
-            rows = tracks_for_session_enriched(args.session_id)
-            if not rows:
-                console.print(f"[dim]No enriched tracks for {args.type} session #{args.session_id}.[/dim]")
-                return
-            t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
-            t.add_column("Time",     style="dim", width=8)
-            t.add_column("Artist",   min_width=20)
-            t.add_column("Title",    min_width=24)
-            t.add_column("BPM",      style="dim", width=6)
-            t.add_column("Key",      style="dim", width=5)
-            t.add_column("Genre",    min_width=14)
-            t.add_column("Released", style="dim", width=11)
-            t.add_column("BP ID",    style="dim", width=10)
-            t.add_column("Link",     style="blue", no_wrap=True)
-            t.add_column("MIK Key",  style="dim", width=8)
-            t.add_column("Nrg",      style="dim", width=4)
-            for r in rows:
-                bpm      = f"{r['bpm']:.0f}" if r["bpm"] else "—"
-                released = (r["release_date"] or "—")[:10]
-                bp_id    = str(r["beatport_id"]) if r["beatport_id"] else "—"
-                bp_link  = r["beatport_link"] or "—"
-                mik_key  = r["mik_key"] or "—"
-                mik_nrg  = str(r["mik_nrg"]) if r["mik_nrg"] is not None else "—"
-                t.add_row(_pos_str(r["position"]), r["artist"] or "—", r["title"] or "—",
-                          bpm, r["key"] or "—", r["genre"] or "—",
-                          released, bp_id, bp_link, mik_key, mik_nrg)
-            console.print(t)
-            console.print(f"\n[dim]{len(rows)} Beatport-matched tracks[/dim]")
+        rows = tracks_for_session_enriched(args.session_id)
+        if not rows:
+            console.print(f"[dim]No tracks for {args.type} session #{args.session_id}.[/dim]")
+            return
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("#",        style="dim", width=8)
+        t.add_column("Artist",   min_width=20)
+        t.add_column("Title",    min_width=24)
+        t.add_column("BPM",      style="dim", width=6)
+        t.add_column("Key",      style="dim", width=5)
+        t.add_column("Genre",    min_width=14)
+        t.add_column("Released", style="dim", width=11)
+        t.add_column("BP ID",    style="dim", width=10)
+        t.add_column("Link",     style="blue", no_wrap=True)
+        t.add_column("MIK Key",  style="dim", width=8)
+        t.add_column("Nrg",      style="dim", width=4)
+        for r in rows:
+            outcome  = r["enrich_outcome"] or ""
+            fuzzy    = "[yellow]~[/yellow]" if outcome == "fuzzy_miss" else ""
+            artist   = (r["artist"] or "—") + (f" {fuzzy}" if fuzzy else "")
+            bpm      = f"{r['bpm']:.0f}" if r["bpm"] else "—"
+            released = (r["release_date"] or "—")[:10]
+            bp_id    = str(r["beatport_id"]) if r["beatport_id"] else "—"
+            bp_link  = r["beatport_link"] or "—"
+            mik_key  = r["mik_key"] or "—"
+            mik_nrg  = str(r["mik_nrg"]) if r["mik_nrg"] is not None else "—"
+            t.add_row(_pos_str(r["position"]), artist, r["title"] or "—",
+                      bpm, r["key"] or "—", r["genre"] or "—",
+                      released, bp_id, bp_link, mik_key, mik_nrg)
+        console.print(t)
+        console.print(f"\n[dim]{len(rows)} tracks[/dim]")
