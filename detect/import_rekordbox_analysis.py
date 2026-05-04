@@ -51,14 +51,27 @@ console = Console()
 # integer per phrase entry.
 MOOD_NAMES = {1: "Low", 2: "Mid", 3: "High (EDM)"}
 
-# kind → label by mood
+# kind → label by mood. Mood Low/Mid mapping is well-attested from community
+# reverse-engineering (rekordcrate); Mood High is less consistently documented
+# beyond kinds 1-5. Mood High 6-10 are best-guess from observed track structure
+# patterns (Up → Down → 8 → 9 → Chorus → Outro) and may be slightly off — the
+# raw `kind_id` is also preserved in rk_analysis_json so callers can audit.
 PHRASE_LABELS_LOW_MID = {
-    1: "Intro", 2: "Verse 1", 3: "Verse 2", 4: "Verse 3", 5: "Verse 4",
-    6: "Verse 5", 7: "Verse 6", 8: "Bridge", 9: "Chorus", 10: "Outro",
+    1: "Intro",
+    2: "Verse 1", 3: "Verse 2", 4: "Verse 3", 5: "Verse 4",
+    6: "Verse 5", 7: "Verse 6",
+    8: "Bridge", 9: "Chorus", 10: "Outro",
+    11: "Outro 2", 12: "Outro 3",
 }
 PHRASE_LABELS_HIGH = {
-    1: "Intro", 2: "Up", 3: "Down", 4: "Chorus", 5: "Outro",
-    6: "Verse 1", 7: "Verse 2",
+    1: "Intro",
+    2: "Up", 3: "Down",
+    4: "Chorus",
+    5: "Outro",
+    6: "Up 2", 7: "Down 2",
+    8: "Build",  # right before chorus — observed in EDM tracks
+    9: "Drop",   # kind:9 phrases tend to anchor peak energy
+    10: "Outro 2",
 }
 
 def _phrase_label(mood: int, kind: int) -> str:
