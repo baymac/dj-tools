@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "yt-dlp>=2024.1",
     "mutagen>=1.47",
+    "cryptography>=42",
     # sync
     "playwright>=1.58",
     "playwright-stealth>=1.0",
