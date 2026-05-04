@@ -89,7 +89,7 @@ def _resolve_anlz_dir(analysis_data_path: str, share_dir: Path) -> Optional[Path
 
 def _extract_phrases(anlz, beat_to_time_sec) -> list[dict]:
     """Parse the PSSI tag if present. Returns a list of phrase dicts."""
-    pssi = anlz.get_tag("PSSI") if "PSSI" in anlz.tag_types() else None
+    pssi = anlz.get_tag("PSSI") if "PSSI" in anlz.tag_types else None
     if pssi is None:
         return []
     content = pssi.content
@@ -117,7 +117,7 @@ def _extract_phrases(anlz, beat_to_time_sec) -> list[dict]:
 
 
 def _extract_pssi_mood(anlz) -> Optional[int]:
-    if "PSSI" not in anlz.tag_types():
+    if "PSSI" not in anlz.tag_types:
         return None
     return int(anlz.get_tag("PSSI").content.get("mood", 0))
 
@@ -131,7 +131,7 @@ def _extract_cues(anlz, beat_to_time_sec) -> tuple[list[dict], list[dict]]:
     memory: list[dict] = []
     hot: list[dict] = []
     # Prefer PCO2 (extended, has color + name); fall back to PCOB.
-    types = set(anlz.tag_types())
+    types = set(anlz.tag_types)
     for tag_name in ("PCO2", "PCOB"):
         if tag_name not in types:
             continue
@@ -177,7 +177,7 @@ def _build_rk_blob(rb_content, anlz_files: list, bpm_x100: int) -> dict:
     seen_tags: set[str] = set()
 
     for anlz in anlz_files:
-        seen_tags.update(anlz.tag_types())
+        seen_tags.update(anlz.tag_types)
         if mood is None:
             mood = _extract_pssi_mood(anlz)
         if not phrases:
