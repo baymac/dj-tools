@@ -164,7 +164,10 @@ def capture_token(username: Optional[str] = None, password: Optional[str] = None
     """Browser login → (access_token, session_cookie).
 
     Gets session cookie via browser, then uses refresh_via_session to get the
-    access token — same reauth path as normal token refresh, no duplicate logic.
+    access token. NextAuth rotates the session cookie on every refresh, and
+    refresh_via_session persists the rotated cookie to .env. We read it back
+    here so the returned cookie is the one currently valid server-side, not
+    the (now-invalidated) one we captured from the browser.
     """
     session_cookie = asyncio.run(_capture_session_cookie_async(username, password, headless=headless))
     access_token = refresh_via_session(session_cookie)
@@ -173,7 +176,14 @@ def capture_token(username: Optional[str] = None, password: Optional[str] = None
             "Logged in but failed to get access token from /api/auth/session.\n"
             "The session may not have been fully established — try again."
         )
-    return access_token, session_cookie
+
+    try:
+        from dotenv import dotenv_values
+        env_path = __import__("pathlib").Path(__file__).resolve().parent.parent / ".env"
+        current = dotenv_values(str(env_path)).get("BEATPORT_SESSION_TOKEN") or session_cookie
+    except Exception:
+        current = session_cookie
+    return access_token, current
 
 
 def _jwt_payload(token: str) -> dict:
@@ -193,10 +203,11 @@ def refresh_via_session(session_cookie: str) -> Optional[str]:
 
     Calls /api/auth/session with the __Secure-next-auth.session-token cookie.
     NextAuth uses the embedded refresh token server-side and returns a new accessToken.
+    NextAuth ALSO rotates the session cookie on every refresh — if a new cookie comes
+    back in Set-Cookie, we persist it to .env so the next refresh works. Otherwise
+    the next call would use a stale cookie and fail.
 
     Returns 'Bearer <new_token>' or None if refresh failed or returned an expired token.
-    Note: if the session cookie's embedded refresh token has already been rotated
-    (NextAuth rotates on each use), this will return None and the user needs a new cookie.
     """
     try:
         r = httpx.get(
@@ -211,16 +222,21 @@ def refresh_via_session(session_cookie: str) -> Optional[str]:
         r.raise_for_status()
         data = r.json()
         token_data = data.get("token") or {}
-        # NextAuth sets token.error when the refresh token is invalid/expired
         if token_data.get("error"):
             return None
         new_token = token_data.get("accessToken")
-        if new_token:
-            bearer = f"Bearer {new_token}"
-            # Verify the returned token isn't already expired (stale cached session)
-            payload = _jwt_payload(bearer)
-            if payload.get("exp", 0) > time.time():
-                return bearer
+        if not new_token:
+            return None
+        bearer = f"Bearer {new_token}"
+        if _jwt_payload(bearer).get("exp", 0) <= time.time():
+            return None
+
+        rotated_cookie = r.cookies.get("__Secure-next-auth.session-token")
+        if rotated_cookie and rotated_cookie != session_cookie:
+            save_token_to_env(bearer, rotated_cookie)
+        else:
+            save_token_to_env(bearer)
+        return bearer
     except Exception:
         pass
     return None
