@@ -1,107 +1,112 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance to Claude Code for this repository.
 
 ## Project Overview
 
-A two-function CLI tool, plus a side bin of standalone analysis scripts.
+Unified DJ tool. Builds a fully-analysed track library by progressively enriching each track with Beatport metadata, DJ Studio analysis, and rekordbox phrase tags. Then any SQL-curated subset can be pushed to a Beatport playlist, a rekordbox playlist, or a DJ Studio mix.
 
-**Function 1 — `dj_cli.py migrate`** moves a DJ.Studio mix into rekordbox. Extracts the project from DJ.Studio's local files, then writes tracks, playlist, transition effects, and beatgrid-snapped hot cues into rekordbox's encrypted SQLite via `pyrekordbox`.
+All tool-generated files live under `~/Music/dj-tools/` (DB at `dj.db`, per-command logs at `logs/<cmd>/`, state at `state/`, etc). `paths.py` is the single source of truth and auto-migrates old locations on first import.
 
-**Function 2 — `dj_cli.py db`** maintains a SQLite metadata database (`~/Music/DJ.Studio/track_metadata.db`) seeded from DJ.Studio's library. Stores energy, vocals/drums/melody intensity, and section markers per track. Designed to feed an LLM-driven mixing recommender later.
-
-**Side bin — `local-analyse/`** contains standalone helpers that aren't part of either pipeline: a single-track Beatport analyser (key/BPM/energy from preview audio, no DB writes) and the Beatport auth CLI it depends on.
+See `README.md` for the full pipeline narrative + flag reference. This file only covers things that aren't obvious from reading the code.
 
 ## Layout
 
 ```
-brasilia/
-├── dj_cli.py                # Single CLI entrypoint: `migrate` and `db` subcommands
-├── pipeline.py              # Full migrate flow: extract → Pass 1 → watch → Pass 2
-├── djstudio/                # Read DJ.Studio's local files
-│   ├── keys.py              # CAMELOT_MAP and Camelot conversion
-│   ├── extractor.py         # DJStudioMixExtractor (projects, library, mixes)
-│   └── display.py           # print_mix_info, print_mix_list
-├── rekordbox/               # Write rekordbox's encrypted DB via pyrekordbox
-│   ├── constants.py         # Paths, CUE_KIND, BASS_SWAP_EFFECTS, GENRE_PREP_BARS
-│   ├── backup.py            # backup_db, undo_list, undo_restore
-│   ├── cues.py              # Pure cue math: beats_to_ms, snap_to_beatgrid, prep_bars_for
-│   ├── importer.py          # RekordboxImporter (Pass 1 + Pass 2 orchestrator)
-│   └── display.py           # print_report, print_cues_report, fmt_ms
-├── trackdb/                 # Track metadata DB
-│   ├── schema.py            # SQLite schema + DB_PATH + validators
-│   ├── library.py           # Read DJ.Studio library, structures, stems, projects
-│   ├── commands.py          # cmd_populate / list / show / update / section_*
-│   └── cli.py               # Build `dj db` subparsers + dispatch
-├── helpers/                 # Maintenance scripts (not part of either main function)
-│   └── cleanup_playlist.py  # Wipe a rekordbox playlist + cues + comments + tracks
-├── local-analyse/           # Standalone helpers (not part of either pipeline)
-│   ├── beatport_analyze.py  # Single Beatport URL → key+BPM+energy (read-only)
-│   ├── beatport_auth.py     # Beatport login / status / clear
-│   ├── djs_analyze.js       # ai-beatgrid wrapper for BPM
-│   └── .beatport_token      # Stored token (gitignored)
-├── tests/                   # pytest
-├── logs/                    # gitignored
-├── pyproject.toml
-└── README.md
+dj_cli.py                       CLI entrypoint — detect / sync / playlist / login-beatport
+
+connections/                    Transport layer (no app-specific deps)
+  beatport.py                   Beatport HTTP client + Playwright session token capture
+  matching.py                   Fuzzy title/artist matching
+  musickit.py                   Swift MusicKit bridge subprocess wrapper
+  bridge/musickit_bridge.swift  Compiled on first use, cached
+
+detect/                         Track detection + enrichment pipeline (Stages 2-6)
+  db.py                         All detect+enrich DB operations
+  cli.py                        argparse subcommands + async dispatch
+  enrich.py                     Stage 3: detected → Beatport metadata (also full track-detail)
+  sync_beatport.py              Stage 4: pull Beatport library → enriched_tracks
+  import_to_studio.py           Stage 5a: drive DJ Studio SDK headlessly
+  dj_studio_sdk.js              Long-running Node helper for Stage 5a
+  enrich_studio.py              Stage 5b: read DJ Studio library files
+  export_to_rekordbox.py        Stage 6a: idempotent pending → rekordbox playlist
+  import_rekordbox_analysis.py  Stage 6b: ingest PSSI + cues from ANLZ
+  instagram.py / mixcloud.py / youtube.py / radio.py / podbean.py / reddit.py
+                                Stage 2: per-platform Shazam capture
+  shazam.py / parser.py         Audio recognition + tracklist parsing
+
+sync/                           Stage 1: Apple Music → Beatport
+  db.py / sync.py / classifier.py / cli.py
+
+playlist/                       SQL-curated push to one of three destinations
+  query.py                      Run user SQL → list[beatport_id] + full-row fetch
+  to_beatport.py                Push to a Beatport playlist
+  to_rekordbox.py               Push to a rekordbox playlist (also called by Stage 6a)
+  to_djstudio.py                Write a DJ Studio mix project file
+  cli.py
+
+djstudio/                       Read DJ Studio's local files
+  extractor.py                  audio-library-table loader (used by enrich-studio)
+  keys.py                       Camelot conversion
+
+rekordbox/                      Rekordbox writes via pyrekordbox
+  backup.py                     master.db backup before any write
+  constants.py                  Path discovery + Camelot/cue-kind constants
+
+helpers/                        Standalone maintenance scripts
+tests/                          pytest
 ```
 
 ## Commands
 
 ```bash
-# Function 1 — DJ Studio mix → Rekordbox
-uv run dj_cli.py migrate "Mix Name"                  # full pipeline (extract + Pass 1 + watch + Pass 2)
-uv run dj_cli.py migrate "Mix Name" --extract-only -o mix.json
-uv run dj_cli.py migrate mix.json                    # use existing JSON
-uv run dj_cli.py migrate mix.json --pass1-only --dry-run
-uv run dj_cli.py migrate mix.json --pass2-only       # cues only (after rekordbox analysis)
-uv run dj_cli.py migrate mix.json --no-watch         # Pass 1 only, skip the watch
-uv run dj_cli.py migrate mix.json --no-snap          # Pass 2: don't snap to beatgrid
-uv run dj_cli.py migrate --list                      # list available DJ.Studio mixes
-
-# Undo — restore rekordbox DB from automatic pre-write backup
-uv run dj_cli.py undo list
-uv run dj_cli.py undo restore 20260427_143200_My_Mix.db
-
-# Function 2 — Track metadata DB
-uv run dj_cli.py db populate "Ibiza Vibes"           # tracks from latest revision of this mix
-uv run dj_cli.py db list
-uv run dj_cli.py db show beatport-sdk_12345678
-uv run dj_cli.py db update beatport-sdk_12345678 --energy 8 --vocals high --drums high --melody low
-uv run dj_cli.py db section add beatport-sdk_12345678 drop 128 256
-uv run dj_cli.py db section list beatport-sdk_12345678
-uv run dj_cli.py db section remove 5
-
-# Standalone helpers (read-only, single-track)
-uv run local-analyse/beatport_auth.py login
-uv run local-analyse/beatport_auth.py status
-uv run local-analyse/beatport_analyze.py https://www.beatport.com/track/title/12345678
-
-# Maintenance — wipe a rekordbox playlist before re-running migrate
-uv run helpers/cleanup_playlist.py --list
-uv run helpers/cleanup_playlist.py "Ibiza Vibes" --dry-run
-uv run helpers/cleanup_playlist.py "Ibiza Vibes" --delete-tracks
-
-# Setup + tests
+# Setup
 uv sync
+uv run playwright install chromium
+
+# Tests
 uv run pytest
+
+# Auth
+uv run dj_cli.py login-beatport          # auto / --ui / --cookie
+
+# Pipeline (see README.md for full flow)
+uv run dj_cli.py sync music-beatport sync --library
+uv run dj_cli.py detect youtube <url>
+uv run dj_cli.py detect enrich
+uv run dj_cli.py detect sync-beatport
+uv run dj_cli.py detect import-to-studio
+uv run dj_cli.py detect enrich-studio
+uv run dj_cli.py detect export-to-rekordbox
+uv run dj_cli.py detect import-rekordbox-analysis
+
+# SQL → playlist (any of the three destinations)
+uv run dj_cli.py playlist beatport  --query "SELECT beatport_id FROM enriched_tracks WHERE ..." --name "..."
+uv run dj_cli.py playlist rekordbox --query "..." --name "..."
+uv run dj_cli.py playlist dj-studio --query "..." --name "..."
+
+# Maintenance
+uv run helpers/cleanup_playlist.py "Playlist Name" --dry-run
 ```
 
 ## Key Design Decisions
 
-- **Direct DB writes via pyrekordbox** — XML import doesn't work for Beatport streaming tracks, so `rekordbox/importer.py` writes to `master.db` directly. Rekordbox must be closed.
-- **Hot cue layout** — A-D = incoming transition (A=prep, B=start, C=bass swap, D=end). E-H = outgoing transition (E=prep, F=start, G=bass swap, H=end). Letters left empty when transition or bass swap doesn't exist.
-- **Outgoing transition direction** — Starts AT `end_beat` and extends forward by `duration_beats` (not backward). Incoming starts at `start_beat` and extends forward.
-- **Prep cue distance** — Genre-tuned via `GENRE_PREP_BARS` in `rekordbox/constants.py`: techno/trance=16, house/electronica=8, DnB/trap=4. Falls back to `PREP_BARS=8`. Always capped at half the transition duration so the prep cue doesn't collide with the previous transition's end cue.
-- **Bass swap cue** — Only written when `AE_Bass_Swap`, `AE_Bass_SwapFade`, or `AE_Bass_CrossFade` is in the effects list. Position uses `effect_offset` if > 0, else transition midpoint.
-- **Two-pass import** — Pass 1 creates tracks/playlist/effects but skips cues. After rekordbox analyzes the tracks (generating ANLZ beatgrids), Pass 2 reads the PQTZ tag from ANLZ files and snaps cue points to the nearest downbeat (beat 1 of bar) via `bisect_left`. `--no-snap` disables snapping for fallback.
-- **Beat-to-ms conversion** — `beat * 60000 / bpm`. Uses each track's own BPM.
-- **Transition numbering** — Transition N = mix between track N and track N+1. Outgoing = `trans_by_num[pos]`, incoming = `trans_by_num[pos-1]`.
-- **BPM storage** — Rekordbox stores BPM as integer * 100 (129 BPM = 12900).
-- **Cue IDs** — Generated via `uuid4()`, not `generate_unused_id`, because `DjmdCue` uses string UUIDs.
-- **Rekordbox path discovery** — `rekordbox/constants.py` asks `pyrekordbox.config` for the actual master.db path (rekordbox 7 → 6 fallback). Don't hardcode the legacy `Application Support/Pioneer/rekordbox6/` path; rekordbox 7 lives at `~/Library/Pioneer/rekordbox/`.
-- **Automatic backups** — Before every write (Pass 1, Pass 2, or `helpers/cleanup_playlist.py`), `backup_db()` copies `master.db` to `<db_dir>/claude-backups/{timestamp}_{mix}.db`. `dj_cli.py undo list` / `dj_cli.py undo restore` manage these. `cleanup_playlist.py` aborts if `backup_db()` returns `None`.
-- **Mix name → latest revision** — DJ Studio saves a separate project file per revision, so the same mix name often points to many candidates. Both `migrate` and `db populate` use `djstudio.extractor.find_latest_project()`, which picks the candidate with the highest `lastModified` timestamp. The picked uuid + timestamp are printed so the caller can confirm.
-- **`db populate` is single-mix** — Takes one required mix name. Inserts only tracks referenced by that mix's `mixList`. Existing rows from earlier populates stay in place (preserves user-edited annotations); to start clean, delete the SQLite file at `~/Music/DJ.Studio/track_metadata.db`.
-- **ANLZ watcher** — `pipeline.watch_for_analysis()` counts `.DAT` files under `rekordbox6/share/` as a proxy for analysis progress (each track creates ~2 files). Advances to Pass 2 automatically once rekordbox closes.
-- **`local-analyse/` is intentionally outside the main pipeline** — Beatport preview analysis is read-only and acts on a single track. It does not write to `track_metadata.db`. If you want analysis results in the DB, edit them in via `dj_cli.py db update`.
+### Enrichment pipeline (detect + sync)
+
+- **Two enriched tables, no mirror** — `enriched_tracks` carries everything Beatport-derived (basic search-result fields + the 6 catalog-detail extras). `enriched_tracks_analysis` is sparse: keyed on `beatport_id`, holds only DJ Studio + rekordbox analysis data (mik_key, mik_nrg, vocals/drums/melody, rk_analysis_json) plus the per-stage timestamps. A row exists in the analysis table only after `enrich-studio` has populated it. Joins (e.g., `enriched_tracks LEFT JOIN enriched_tracks_analysis USING(beatport_id)`) build the full picture at query time.
+- **Beatport metadata in one place** — Full track-detail (label, ISRC, mix_name, sub_genre, length_ms, catalog_number) is fetched **only** in `detect/enrich.py` (and inline-extracted from playlist responses by `detect/sync_beatport.py`) and lands directly on `enriched_tracks`. Stages 5 and 6 must not call Beatport. Reason: `import-to-studio` already runs a long Node helper; an extra Beatport client + token-refresh path there is what caused the prior mid-run token-expiry incident.
+- **import-to-studio writes only to DJ Studio's filesystem** — Stage 5a does NOT touch our DB. The pending-check is "does `beatport-sdk_<id>` exist in DJ Studio's `audio-library-table`" — DJ Studio's own filesystem is the single source of truth for "this track is imported".
+- **enrich-studio is the analysis-table creation point** — Stage 5b reads back from DJ Studio's library files and INSERT-or-UPDATEs `enriched_tracks_analysis` via `upsert_analysis(beatport_id, fields)` (stamps `dj_studio_at` automatically on insert).
+- **mark_pipeline_done only handles rekordbox stamps** — `dj_studio_at` is set by `upsert_analysis`, not by the caller. Valid columns are `rekordbox_export_at` (Stage 6a) and `rekordbox_analysis_at` (Stage 6b). Passing anything else raises.
+- **DJ Studio analysis is headless via SDK** — `detect/import_to_studio.py` decrypts DJ Studio's local refresh token (AES-256-CBC, hardcoded key in `encryptedToken-v2.dat`), exchanges it for a JWT via `app-services.dj.studio`, then drives `dj_studio_sdk.js` (a long-running Node helper that loads `@appmachine/beatport-sdk` + `@appmachine/ai-stems` + `@appmachine/ai-beatgrid` + the MIK WASM extractor and calls `cf.dj.studio/mixedinkey/analyze`). DJ Studio must be quit (port 61894 + `.beatport/` cache locks).
+- **No phrase labels from DJ Studio** — DJ Studio's `track-structures-table.phraseData` is always empty (the renderer never calls the dormant ML phrase model). Real semantic phrase labels (Intro/Verse/Chorus/Outro/Up/Down/Bridge) come exclusively from Stage 6's rekordbox PSSI tag.
+- **Rekordbox round-trip = three steps** — `export-to-rekordbox` pushes bare Beatport streaming entries (`FileType=20`) into a named playlist with no cue points (those would shadow rekordbox's own analysis output). Manual: open rekordbox → right-click playlist → Analyze Tracks. Then `import-rekordbox-analysis` reads PSSI + PCO2/PCOB into `rk_analysis_json`. Both stages JOIN `enriched_tracks_analysis` with `enriched_tracks` for the artist/title/key/bpm fields they need.
+- **Beatport access token refresh** — `BEATPORT_ACCESS_TOKEN` ~10 min, `BEATPORT_SESSION_TOKEN` ~32 days. The session token auto-refreshes the access token on 401. Don't add manual refresh wrappers around individual stages. `connections/beatport.refresh_via_session(verbose=True)` (or `BEATPORT_DEBUG=1`) prints the real cause when refresh fails — usually means the persistent browser profile at `~/Music/dj-tools/state/browser-profile/` needs wiping so `--ui` can do a clean re-login.
+- **Stage 1 (sync) cursor** — `--library` mode tracks the last `library_added_date` processed in the `cursors` table; re-runs only handle new Apple Music additions. `synced_tracks` keeps per-track outcome (`added` / `duplicate` / `fuzzy_miss` / `no_classify`) so a track is never reprocessed.
+
+### playlist (SQL → destination)
+
+- **Stage 6a (`detect export-to-rekordbox`) and `playlist rekordbox` share the same core** — `playlist.to_rekordbox.push_to_rekordbox(rows, name)` does the writing. Stage 6a wraps it with the `rekordbox_export_at IS NULL` pending-query and an `on_added` callback to stamp the timestamp. `playlist rekordbox` calls the same function with no callback — pure ad-hoc curation, no pipeline-stamp side effects.
+- **User SQL must return `beatport_id`** — `playlist.query.run_user_query` validates the query starts with `SELECT` (the only check; the column-shape error fires after fetch if `beatport_id` isn't in the result set). After exec, `fetch_full_rows` re-fetches via `enriched_tracks LEFT JOIN enriched_tracks_analysis USING(beatport_id)` so push code always has artist/title/genre/key/bpm/length_ms regardless of how the user wrote their SQL. The query runs with the connection's full DB privileges — this tool assumes the user owns the database.
+- **DJ Studio mix file format** — `playlist dj-studio` writes to `~/Music/DJ.Studio/Database/projects-table/<uuid>` with linear `mixList` and empty `autoEffects`. The minimal field set is `{key, name, genre, duration, trackCount, minBpm, maxBpm, createdAt, lastModified, mixList, autoEffects}` — all of which DJ Studio's reader (`djstudio/extractor.py`) consumes. If DJ Studio rejects a generated mix on a future version, the missing field will surface in DJ Studio's logs; add it here.
+- **dj-studio destination requires tracks already imported** — checks `~/Music/DJ.Studio/Database/audio-library-table/*/beatport-sdk_<id>` for each beatport_id; missing ones are warned and skipped. Run `dj detect import-to-studio` first to populate the library.
