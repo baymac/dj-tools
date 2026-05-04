@@ -611,7 +611,8 @@ def run_import_to_studio(
     bp_http = bp_api.make_client(bp_token)
     beatport = bp_api.Beatport(client=bp_http)
 
-    counts = {"seen": 0, "ok": 0, "fail": 0}
+    counts = {"seen": 0, "ok": 0, "fail": 0, "retried": 0}
+    failed_rows: list[dict] = []  # (row, last_error) for end-of-run retry pass
 
     progress = Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
@@ -619,85 +620,123 @@ def run_import_to_studio(
         console=console,
     )
 
+    def _process_one(row, helper, *, attempt_label: str = "") -> tuple[bool, str]:
+        """Returns (ok, error_message). Side-effect: writes to DJ Studio + enriched_tracks_test."""
+        bid = row["beatport_id"]
+        artist = row["artist"] or ""
+        title = row["title"] or ""
+
+        res = helper.analyze(bid)
+        if not res["ok"]:
+            return False, res.get("message", "unknown") or "unknown"
+
+        shaped = _shape_result(bid, res["result"])
+        if shaped is None:
+            # Surface the underlying classifier body for debugging
+            srv = (res.get("result") or {}).get("server") or {}
+            return False, f"classifier ok={srv.get('ok')} status={srv.get('status')} body={str(srv.get('body'))[:120]}"
+
+        library_key = f"{KIND}_{bid}"
+        entry = _build_library_entry(beatport_id=bid, artist=artist, title=title, shaped=shaped)
+        _write_library_entry(library_key, entry)
+        _write_track_structures(library_key, shaped)
+
+        stems_b64 = shaped["stems_compressed_b64"] or {}
+        _write_compressed_view(DJ_STUDIO_VOCALS, library_key, stems_b64.get("vocals"))
+        _write_compressed_view(DJ_STUDIO_DRUMS,  library_key, stems_b64.get("drums"))
+        _write_compressed_view(DJ_STUDIO_BASS,   library_key, stems_b64.get("bass"))
+        _write_compressed_view(DJ_STUDIO_MELODY, library_key, stems_b64.get("other"))
+
+        bp_meta = {}
+        try:
+            track = beatport.get_track(bid)
+            if track:
+                label_obj = (track.get("release") or {}).get("label") or {}
+                sub_genre = track.get("sub_genre") or {}
+                bp_meta = {
+                    "mix_name": track.get("mix_name"),
+                    "label": label_obj.get("name") if isinstance(label_obj, dict) else None,
+                    "catalog_number": track.get("catalog_number"),
+                    "isrc": track.get("isrc"),
+                    "sub_genre": sub_genre.get("name") if isinstance(sub_genre, dict) else None,
+                    "length_ms": track.get("length_ms"),
+                }
+        except Exception:
+            pass
+
+        rich = dict(shaped["rich"])
+        rich.update({k: v for k, v in bp_meta.items() if v is not None})
+        rich["analysis_json"] = shaped["analysis_json"]
+        if table == "enriched_tracks_test":
+            detect_db.update_enriched_tracks_test_rich(bid, rich)
+
+        if verbose:
+            t = res["result"].get("timing_ms", {})
+            progress.log(
+                f"[green]bp:{bid}[/green]{attempt_label}  "
+                f"key={MIK_CAMELOT_INT_TO_STR.get(shaped['mik_key_int'])}/"
+                f"{shaped['rich'].get('mik_key_secondary') or '-'}  "
+                f"conf={shaped['rich'].get('mik_key_confidence') or 0:.2f}  "
+                f"nrg={shaped['mik_nrg_int']}  "
+                f"bpm={shaped['bpm']:.2f}  "
+                f"phr={shaped['rich'].get('phrase_count')}  "
+                f"cue={shaped['rich'].get('cue_points_count')}  "
+                f"({t.get('total', 0)/1000:.1f}s)"
+            )
+        return True, ""
+
     with SdkHelper(access_jwt, verbose=verbose) as helper, progress:
         task = progress.add_task("Analyzing…", total=len(rows))
-
         for row in rows:
             counts["seen"] += 1
-            bid = row["beatport_id"]
             artist = row["artist"] or ""
             title = row["title"] or ""
             progress.update(task, advance=1, description=f"{artist} — {title}")
 
-            res = helper.analyze(bid)
-            if not res["ok"]:
-                counts["fail"] += 1
+            ok, err = _process_one(row, helper)
+            if ok:
+                counts["ok"] += 1
+            else:
+                failed_rows.append({"row": row, "error": err})
                 if verbose:
-                    progress.log(f"[red]bp:{bid}[/red] {res['message'][:200]}")
-                continue
+                    progress.log(f"[yellow]bp:{row['beatport_id']} first-pass failed:[/yellow] {err[:160]}")
 
-            shaped = _shape_result(bid, res["result"])
-            if shaped is None:
-                counts["fail"] += 1
-                if verbose:
-                    progress.log(f"[yellow]bp:{bid} unusable analyzer output[/yellow]")
-                continue
-
-            library_key = f"{KIND}_{bid}"
-            entry = _build_library_entry(beatport_id=bid, artist=artist, title=title, shaped=shaped)
-            _write_library_entry(library_key, entry)
-            _write_track_structures(library_key, shaped)
-
-            stems_b64 = shaped["stems_compressed_b64"] or {}
-            _write_compressed_view(DJ_STUDIO_VOCALS, library_key, stems_b64.get("vocals"))
-            _write_compressed_view(DJ_STUDIO_DRUMS,  library_key, stems_b64.get("drums"))
-            _write_compressed_view(DJ_STUDIO_BASS,   library_key, stems_b64.get("bass"))
-            # DJ Studio's "melody" stem is what Demucs calls "other".
-            _write_compressed_view(DJ_STUDIO_MELODY, library_key, stems_b64.get("other"))
-
-            # Pull extra Beatport catalog metadata for the rich row.
-            bp_meta = {}
-            try:
-                track = beatport.get_track(bid)
-                if track:
-                    label_obj = (track.get("release") or {}).get("label") or {}
-                    sub_genre = track.get("sub_genre") or {}
-                    bp_meta = {
-                        "mix_name": track.get("mix_name"),
-                        "label": label_obj.get("name") if isinstance(label_obj, dict) else None,
-                        "catalog_number": track.get("catalog_number"),
-                        "isrc": track.get("isrc"),
-                        "sub_genre": sub_genre.get("name") if isinstance(sub_genre, dict) else None,
-                        "length_ms": track.get("length_ms"),
-                    }
-            except Exception:
-                pass
-
-            # Write rich fields to enriched_tracks_test (or the chosen table).
-            rich = dict(shaped["rich"])
-            rich.update({k: v for k, v in bp_meta.items() if v is not None})
-            rich["analysis_json"] = shaped["analysis_json"]
-            if table == "enriched_tracks_test":
-                detect_db.update_enriched_tracks_test_rich(bid, rich)
-
-            counts["ok"] += 1
-            if verbose:
-                t = res["result"].get("timing_ms", {})
-                progress.log(
-                    f"[green]bp:{bid}[/green] "
-                    f"key={MIK_CAMELOT_INT_TO_STR.get(shaped['mik_key_int'])}/"
-                    f"{shaped['rich'].get('mik_key_secondary') or '-'}  "
-                    f"conf={shaped['rich'].get('mik_key_confidence') or 0:.2f}  "
-                    f"nrg={shaped['mik_nrg_int']}  "
-                    f"bpm={shaped['bpm']:.2f}  "
-                    f"phr={shaped['rich'].get('phrase_count')}  "
-                    f"cue={shaped['rich'].get('cue_points_count')}  "
-                    f"({t.get('total', 0)/1000:.1f}s)"
-                )
+        # Retry pass — failed rows often pass on a second try if cf.dj.studio
+        # was momentarily slow. Wait briefly to let the service recover.
+        if failed_rows:
+            console.print(f"[dim]Retrying {len(failed_rows)} failed track(s) after 5s pause…[/dim]")
+            import time as _t
+            _t.sleep(5)
+            retry_task = progress.add_task("Retrying…", total=len(failed_rows))
+            still_failed: list[dict] = []
+            for entry in failed_rows:
+                row = entry["row"]
+                progress.update(retry_task, advance=1,
+                                description=f"{row['artist']} — {row['title']} (retry)")
+                ok, err = _process_one(row, helper, attempt_label=" [retry]")
+                if ok:
+                    counts["ok"] += 1
+                    counts["retried"] += 1
+                else:
+                    counts["fail"] += 1
+                    still_failed.append({"row": row, "error": err})
+                    if verbose:
+                        progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {err[:160]}")
+            failed_rows = still_failed
 
     bp_http.close()
     console.print()
-    console.print(f"[bold]Done.[/bold] {counts['ok']}/{counts['seen']} written  ({counts['fail']} failed)")
+    summary = f"{counts['ok']}/{counts['seen']} written"
+    if counts["retried"]:
+        summary += f"  ([green]{counts['retried']} recovered on retry[/green])"
+    if counts["fail"]:
+        summary += f"  ([red]{counts['fail']} failed[/red])"
+    console.print(f"[bold]Done.[/bold] {summary}")
+    if failed_rows:
+        console.print("[red]Permanently failed tracks:[/red]")
+        for fr in failed_rows:
+            r = fr["row"]
+            console.print(f"  bp:{r['beatport_id']} — {r['artist']} — {r['title']}: {fr['error'][:200]}")
     if counts["ok"]:
         flag = "  --test" if "test" in table else ""
         console.print(f"[dim]Next:[/dim] [cyan]uv run dj_cli.py detect enrich-studio{flag}[/cyan]")

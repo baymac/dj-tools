@@ -202,16 +202,48 @@ async function runMikWasm(monoSamples, durationSec) {
 // ── 3. cf.dj.studio classifier (final mikKey + mikEnergy + EnergyLevelSegments) ──
 
 async function callClassifier(requestObject, accessJwt) {
-  const r = await fetch(ANALYZE_URL, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${accessJwt}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(requestObject),
-  });
-  if (r.status !== 200) {
-    const body = await r.text();
-    return { ok: false, status: r.status, body };
+  // cf.dj.studio occasionally times out or 5xx's on long payloads. Retry with
+  // exponential backoff (1s, 3s, 9s) before giving up. 401/403 are not retried
+  // — those are auth errors, not transient.
+  const body = JSON.stringify(requestObject);
+  const maxAttempts = 4;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const ac = new AbortController();
+      const timeoutMs = 90000; // 90s — full track features can take a while
+      const timer = setTimeout(() => ac.abort(), timeoutMs);
+      let r;
+      try {
+        r = await fetch(ANALYZE_URL, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${accessJwt}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body,
+          signal: ac.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (r.status === 200) {
+        return { ok: true, status: 200, body: await r.json(), attempts: attempt };
+      }
+      const txt = await r.text().catch(() => '');
+      // Non-retryable: 4xx auth / bad request
+      if (r.status === 401 || r.status === 403 || r.status === 400) {
+        return { ok: false, status: r.status, body: txt, attempts: attempt };
+      }
+      lastErr = `HTTP ${r.status}: ${txt.slice(0, 200)}`;
+    } catch (e) {
+      lastErr = e.name === 'AbortError' ? 'timeout (90s)' : (e.message || String(e));
+    }
+    // Backoff before next attempt (skip after the last attempt)
+    if (attempt < maxAttempts) {
+      const delay = Math.pow(3, attempt - 1) * 1000;  // 1s, 3s, 9s
+      logMsg(`classifier attempt ${attempt} failed (${lastErr}), retrying in ${delay/1000}s…`);
+      await new Promise((res) => setTimeout(res, delay));
+    }
   }
-  return { ok: true, status: 200, body: await r.json() };
+  return { ok: false, status: 0, body: lastErr || 'unknown error', attempts: maxAttempts };
 }
 
 // ── 4. ai-beatgrid (precise beats + phrases) ──────────────────────────────────
