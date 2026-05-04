@@ -29,8 +29,9 @@ def run_user_query(sql: str) -> list[int]:
     `beatport_id` column is not in the result set, we raise after fetch.
     """
     sql_stripped = sql.strip()
-    if not sql_stripped.lower().startswith("select "):
-        raise ValueError("Query must start with SELECT")
+    sql_lower = sql_stripped.lower()
+    if not (sql_lower.startswith("select ") or sql_lower.startswith("with ")):
+        raise ValueError("Query must start with SELECT or WITH")
 
     with _connect() as con:
         rows = con.execute(sql_stripped).fetchall()
