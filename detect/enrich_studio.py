@@ -87,7 +87,7 @@ def _read_stems(library_key: str) -> dict:
     return result
 
 
-def run_enrich_studio(dry_run: bool, limit: int, verbose: bool) -> None:
+def run_enrich_studio(dry_run: bool, limit: int, verbose: bool, table: str = "enriched_tracks") -> None:
     if dry_run:
         console.print("[yellow]DRY RUN[/yellow] — no changes will be made")
 
@@ -102,7 +102,7 @@ def run_enrich_studio(dry_run: bool, limit: int, verbose: bool) -> None:
 
     console.print(f"[dim]{len(library)} tracks in DJ Studio library[/dim]")
 
-    tracks = detect_db.get_studio_enrichable_tracks()
+    tracks = detect_db.get_studio_enrichable_tracks(table=table)
     if limit:
         tracks = tracks[:limit]
 
@@ -110,7 +110,7 @@ def run_enrich_studio(dry_run: bool, limit: int, verbose: bool) -> None:
         console.print("Nothing to enrich — all matched tracks already have DJ Studio data.")
         return
 
-    console.print(f"[bold]{len(tracks)}[/bold] tracks to enrich with DJ Studio data")
+    console.print(f"[bold]{len(tracks)}[/bold] tracks to enrich with DJ Studio data  [dim]({table})[/dim]")
 
     counts = {"seen": 0, "updated": 0, "not_in_library": 0}
 
@@ -176,7 +176,7 @@ def run_enrich_studio(dry_run: bool, limit: int, verbose: bool) -> None:
                 counts["updated"] += 1
                 continue
 
-            detect_db.update_studio_enrich(enriched_id, data)
+            detect_db.update_studio_enrich(enriched_id, data, table=table)
             counts["updated"] += 1
             if verbose:
                 progress.log(

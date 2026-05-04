@@ -45,6 +45,7 @@ from .db import (
     tracks_for_session_enriched,
     update_session_progress,
 )
+from . import db as detect_db
 from .parser import has_track_info, parse_tracks
 from .reddit import extract_from_text as reddit_extract_from_text, open_editor_for_post as reddit_open_editor
 from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
@@ -1103,6 +1104,25 @@ Examples:
                       help="Stop after N tracks (0 = no limit)")
     es_p.add_argument("--verbose", "-v", action="store_true",
                       help="Print per-track update details")
+    es_p.add_argument("--test", action="store_true",
+                      help="Operate on enriched_tracks_test instead of enriched_tracks")
+
+    # import-to-studio
+    its_p = sub.add_parser(
+        "import-to-studio",
+        help="Download Beatport previews → MIK 11 analysis → write DJ Studio library entries",
+    )
+    its_p.add_argument("--table", default="enriched_tracks_test",
+                       help="Source table (default: enriched_tracks_test)")
+    its_p.add_argument("--limit", type=int, default=0, metavar="N",
+                       help="Stop after N tracks (0 = no limit)")
+    its_p.add_argument("--timeout", type=int, default=600, metavar="S",
+                       help="MIK polling timeout in seconds (default: 600)")
+    its_p.add_argument("--keep-temp", action="store_true",
+                       help="Keep the temp dir of downloaded preview MP3s")
+    its_p.add_argument("--verbose", "-v", action="store_true")
+    its_p.add_argument("--seed", type=int, default=0, metavar="N",
+                       help="(Re)create enriched_tracks_test with the N most-recently-enriched rows first")
 
     # sessions
     _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit")
@@ -1627,7 +1647,21 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
     elif cmd == "enrich-studio":
         from detect.enrich_studio import run_enrich_studio
-        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose)
+        table = "enriched_tracks_test" if getattr(args, "test", False) else "enriched_tracks"
+        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose, table=table)
+
+    elif cmd == "import-to-studio":
+        from detect.import_to_studio import run_import_to_studio
+        if args.seed:
+            n = detect_db.create_enriched_tracks_test(limit=args.seed)
+            console.print(f"[green]✓[/green] Seeded enriched_tracks_test with {n} rows")
+        run_import_to_studio(
+            table=args.table,
+            limit=args.limit,
+            timeout_s=args.timeout,
+            keep_temp=args.keep_temp,
+            verbose=args.verbose,
+        )
 
     elif cmd == "sessions":
         rows = list_sessions(args.type, args.limit)

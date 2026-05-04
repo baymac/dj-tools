@@ -571,22 +571,76 @@ def insert_beatport_track(
         return newly_inserted or newly_linked
 
 
-def get_studio_enrichable_tracks() -> list[sqlite3.Row]:
+_STUDIO_TABLES = frozenset({"enriched_tracks", "enriched_tracks_test"})
+
+
+def get_studio_enrichable_tracks(table: str = "enriched_tracks") -> list[sqlite3.Row]:
+    if table not in _STUDIO_TABLES:
+        raise ValueError(f"Unsupported table: {table}")
     with _connect() as con:
         return con.execute(
-            """SELECT e.id, e.beatport_id, e.artist, e.title
-               FROM enriched_tracks e
-               WHERE e.mik_key IS NULL
-               ORDER BY e.id""",
+            f"""SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm
+                FROM {table} e
+                WHERE e.mik_key IS NULL
+                ORDER BY e.id""",
         ).fetchall()
 
 
-def update_studio_enrich(enriched_id: int, data: dict) -> None:
+def update_studio_enrich(enriched_id: int, data: dict, table: str = "enriched_tracks") -> None:
+    if table not in _STUDIO_TABLES:
+        raise ValueError(f"Unsupported table: {table}")
     with _connect() as con:
         con.execute(
-            """UPDATE enriched_tracks
+            f"""UPDATE {table}
                SET mik_key=?, mik_nrg=?, vocals=?, drums=?, melody=?
                WHERE id=?""",
             (data.get("mik_key"), data.get("mik_nrg"), data.get("vocals"),
              data.get("drums"), data.get("melody"), enriched_id),
         )
+
+
+def create_enriched_tracks_test(limit: int = 100) -> int:
+    """Drop and recreate enriched_tracks_test with `limit` most-recently-enriched rows."""
+    with _connect() as con:
+        con.execute("DROP TABLE IF EXISTS enriched_tracks_test")
+        con.execute("""
+            CREATE TABLE enriched_tracks_test (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                detected_track_id INTEGER,
+                beatport_id       INTEGER NOT NULL,
+                beatport_link     TEXT,
+                bpm               REAL,
+                key               TEXT,
+                genre             TEXT,
+                release_date      TEXT,
+                apple_music_url   TEXT,
+                artist            TEXT,
+                title             TEXT,
+                mik_key           TEXT,
+                mik_nrg           REAL,
+                vocals            TEXT,
+                drums             TEXT,
+                melody            TEXT,
+                enriched_at       TEXT NOT NULL
+            )
+        """)
+        con.execute(
+            "CREATE INDEX idx_ett_beatport_id ON enriched_tracks_test(beatport_id)"
+        )
+        con.execute(
+            """
+            INSERT INTO enriched_tracks_test
+                (detected_track_id, beatport_id, beatport_link, bpm, key, genre,
+                 release_date, apple_music_url, artist, title, mik_key, mik_nrg,
+                 vocals, drums, melody, enriched_at)
+            SELECT detected_track_id, beatport_id, beatport_link, bpm, key, genre,
+                   release_date, apple_music_url, artist, title, mik_key, mik_nrg,
+                   vocals, drums, melody, enriched_at
+            FROM enriched_tracks
+            WHERE beatport_id IS NOT NULL
+            ORDER BY enriched_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return con.execute("SELECT COUNT(*) FROM enriched_tracks_test").fetchone()[0]

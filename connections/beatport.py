@@ -280,6 +280,28 @@ class Beatport:
         r.raise_for_status()
         return r  # unreachable
 
+    def get_track(self, track_id: int) -> Optional[dict]:
+        """GET /catalog/tracks/{id}/ — full track record including sample_url."""
+        try:
+            return self._request(
+                "GET", f"{API_ROOT}/catalog/tracks/{track_id}/"
+            ).json()
+        except AuthExpiredError:
+            raise
+        except Exception:
+            return None
+
+    def preview_url(self, track_id: int) -> Optional[str]:
+        """Return the 30s preview MP3 URL for a track, or None."""
+        rec = self.get_track(track_id)
+        if not rec:
+            return None
+        return (
+            rec.get("sample_url")
+            or rec.get("sample_mp3_url")
+            or (rec.get("sample") or {}).get("url")
+        )
+
     def search_tracks(
         self, query: str, per_page: int = 5, debug: bool = False
     ) -> Optional[list[dict]]:
