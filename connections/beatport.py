@@ -199,7 +199,7 @@ def _jwt_payload(token: str) -> dict:
 _NEXTAUTH_SESSION_URL = "https://www.beatport.com/api/auth/session"
 
 
-def refresh_via_session(session_cookie: str) -> Optional[str]:
+def refresh_via_session(session_cookie: str, *, verbose: bool = False) -> Optional[str]:
     """Refresh the Beatport access token using the NextAuth session cookie.
 
     Calls /api/auth/session with the __Secure-next-auth.session-token cookie.
@@ -209,7 +209,16 @@ def refresh_via_session(session_cookie: str) -> Optional[str]:
     the next call would use a stale cookie and fail.
 
     Returns 'Bearer <new_token>' or None if refresh failed or returned an expired token.
+    Set verbose=True (or BEATPORT_DEBUG=1 in the env) to print the real cause to stderr.
     """
+    import os
+    if os.environ.get("BEATPORT_DEBUG"):
+        verbose = True
+
+    def _why(msg: str) -> None:
+        if verbose:
+            print(f"[refresh_via_session] {msg}", file=sys.stderr)
+
     try:
         r = httpx.get(
             _NEXTAUTH_SESSION_URL,
@@ -220,27 +229,43 @@ def refresh_via_session(session_cookie: str) -> Optional[str]:
             timeout=15,
             follow_redirects=True,
         )
-        r.raise_for_status()
-        data = r.json()
-        token_data = data.get("token") or {}
-        if token_data.get("error"):
-            return None
-        new_token = token_data.get("accessToken")
-        if not new_token:
-            return None
-        bearer = f"Bearer {new_token}"
-        if _jwt_payload(bearer).get("exp", 0) <= time.time():
-            return None
+    except Exception as e:
+        _why(f"HTTP request failed: {type(e).__name__}: {e}")
+        return None
 
-        rotated_cookie = r.cookies.get("__Secure-next-auth.session-token")
-        if rotated_cookie and rotated_cookie != session_cookie:
-            save_token_to_env(bearer, rotated_cookie)
-        else:
-            save_token_to_env(bearer)
-        return bearer
-    except Exception:
-        pass
-    return None
+    if r.status_code != 200:
+        _why(f"HTTP {r.status_code}: {r.text[:200]!r}")
+        return None
+
+    try:
+        data = r.json()
+    except Exception as e:
+        _why(f"JSON parse failed: {e}; body head={r.text[:200]!r}")
+        return None
+
+    token_data = data.get("token") or {}
+    err = token_data.get("error")
+    if err:
+        _why(f"NextAuth returned token.error={err!r} — server-side refresh chain is broken. "
+             f"Wipe ~/Music/dj-tools/state/browser-profile/ and re-run `dj login-beatport --ui`.")
+        return None
+
+    new_token = token_data.get("accessToken")
+    if not new_token:
+        _why(f"no accessToken in response; token keys={list(token_data.keys())}")
+        return None
+
+    bearer = f"Bearer {new_token}"
+    if _jwt_payload(bearer).get("exp", 0) <= time.time():
+        _why("accessToken returned but already expired by JWT exp")
+        return None
+
+    rotated_cookie = r.cookies.get("__Secure-next-auth.session-token")
+    if rotated_cookie and rotated_cookie != session_cookie:
+        save_token_to_env(bearer, rotated_cookie)
+    else:
+        save_token_to_env(bearer)
+    return bearer
 
 
 def save_token_to_env(token: str, session_cookie: Optional[str] = None) -> None:

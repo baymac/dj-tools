@@ -15,12 +15,13 @@ def add_playlist_subparser(parent) -> argparse.ArgumentParser:
         help="Push a SQL query of enriched tracks to Beatport / rekordbox / DJ Studio.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Example queries:\n"
-            "  --query \"SELECT beatport_id FROM enriched_tracks_full "
-            "WHERE genre='Tech House' AND mik_nrg>=7 ORDER BY tempo_precise\"\n"
+            "Example queries (anything that returns beatport_id is valid):\n"
             "  --query \"SELECT beatport_id FROM enriched_tracks "
-            "WHERE bpm BETWEEN 124 AND 128\"\n"
-            "  --query \"SELECT beatport_id FROM enriched_tracks_full "
+            "WHERE genre='Tech House' AND bpm BETWEEN 124 AND 128\"\n"
+            "  --query \"SELECT e.beatport_id FROM enriched_tracks e "
+            "JOIN enriched_tracks_analysis a USING(beatport_id) "
+            "WHERE a.mik_nrg>=7\"\n"
+            "  --query \"SELECT beatport_id FROM enriched_tracks_analysis "
             "WHERE rk_analysis_json LIKE '%\\\"mood_name\\\":\\\"High%' LIMIT 30\""
         ),
     )
@@ -34,7 +35,7 @@ def add_playlist_subparser(parent) -> argparse.ArgumentParser:
         d = sub.add_parser(dest_name, help=dest_help)
         d.add_argument(
             "--query", "-q", required=True,
-            help="SQL query against enriched_tracks_full or enriched_tracks. Must SELECT beatport_id.",
+            help="SQL query against enriched_tracks (and/or enriched_tracks_analysis). Must SELECT beatport_id.",
         )
         d.add_argument(
             "--name", "-n", required=True,
@@ -81,7 +82,7 @@ def _dispatch_impl(args, p: argparse.ArgumentParser, cmd: str) -> None:
     if len(rows) < len(beatport_ids):
         console.print(
             f"[yellow]{len(beatport_ids) - len(rows)} of {len(beatport_ids)} beatport_ids "
-            f"have no row in enriched_tracks_full[/yellow]"
+            f"have no row in enriched_tracks[/yellow]"
         )
 
     if cmd == "beatport":

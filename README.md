@@ -53,22 +53,28 @@ DJ Studio must be **closed** before `detect import-to-studio`.
         │                                                    │
         │  Stage 3: dj detect enrich                         │
         ↓                                                    │
-   enriched_tracks  +  enriched_tracks_full  ←───────────────┘
-   (lean)              (canonical, full data)
+   enriched_tracks  ←─────────────────────────────────────────┘
+   (basic Beatport fields + label/ISRC/mix_name/sub_genre/length_ms)
                               │
-                              │  Stage 5: dj detect import-to-studio
-                              │           dj detect enrich-studio
+                              │  Stage 5a: dj detect import-to-studio
+                              │            (writes only to DJ Studio's local files)
                               ↓
-   enriched_tracks_full  + DJ Studio analysis (mik_key, mik_nrg, stems, cues, beatgrid)
+                      DJ Studio's audio-library-table
                               │
-                              │  Stage 6: dj detect export-to-rekordbox
-                              │           [open rekordbox → Analyze Tracks → close]
-                              │           dj detect import-rekordbox-analysis
+                              │  Stage 5b: dj detect enrich-studio
+                              │            (reads DJ Studio's library, INSERTs row)
                               ↓
-   enriched_tracks_full  + rekordbox phrase analysis (PSSI, hot cues, memory cues)
+   enriched_tracks_analysis  ←  mik_key, mik_nrg, vocals, drums, melody  +  dj_studio_at
+                              │
+                              │  Stage 6a: dj detect export-to-rekordbox
+                              │            [open rekordbox → Analyze Tracks → close]
+                              │  Stage 6b: dj detect import-rekordbox-analysis
+                              ↓
+   enriched_tracks_analysis  +  rk_analysis_json (PSSI phrases + cues)
+                              +  rekordbox_export_at, rekordbox_analysis_at
 ```
 
-Each enrichment stage is idempotent. `enriched_tracks_full` carries per-stage timestamps (`dj_studio_at`, `rekordbox_export_at`, `rekordbox_analysis_at`); re-runs only pick up new work. You can stop at any stage — every stage is independently useful.
+Each enrichment stage is idempotent. `enriched_tracks_analysis` carries per-stage timestamps (`dj_studio_at`, `rekordbox_export_at`, `rekordbox_analysis_at`); re-runs only pick up new work. You can stop at any stage — every stage is independently useful. A row exists in `enriched_tracks_analysis` only after `enrich-studio` has populated it; `enriched_tracks` carries everything Beatport-derived without any sibling rows in the analysis table.
 
 ---
 
@@ -100,7 +106,7 @@ dj
 │   │
 │   ├── enrich                                         Stage 3: detected → Beatport metadata
 │   │                                                  [--dry-run] [--limit N] [--verbose] [--threshold F] [--retry-misses]
-│   ├── sync-beatport                                  Stage 4: Beatport library → enriched_tracks_full
+│   ├── sync-beatport                                  Stage 4: Beatport library → enriched_tracks
 │   │                                                  [--dry-run] [--limit N] [--verbose]
 │   ├── import-to-studio                               Stage 5a: drive DJ Studio analysis headlessly
 │   │                                                  [--limit N] [--keep-temp] [--verbose] [--force]
@@ -197,12 +203,15 @@ uv run dj_cli.py detect reddit https://www.reddit.com/r/HypeTracks/comments/XXXX
 uv run dj_cli.py detect history             # all detected tracks, newest first
 uv run dj_cli.py detect history -n 100
 
-uv run dj_cli.py detect sessions youtube    # session list with track counts
+uv run dj_cli.py detect sessions youtube       # session list with track counts
 uv run dj_cli.py detect sessions mixcloud
 uv run dj_cli.py detect sessions radio
 uv run dj_cli.py detect sessions instagram
 uv run dj_cli.py detect sessions podbean
 uv run dj_cli.py detect sessions reddit
+
+uv run dj_cli.py detect sessions podbean 24    # detected_tracks for one session, in a table
+uv run dj_cli.py detect sessions youtube 7     # (Pos, Artist, Title, Apple Music URL, enrich_outcome)
 
 uv run dj_cli.py detect instagram-history           # grouped by post
 uv run dj_cli.py detect instagram-history --tracks  # flat track list only
@@ -224,11 +233,9 @@ uv run dj_cli.py detect reddit-delete-session <id>
 
 Takes everything in `detected_tracks` that doesn't have a Beatport match yet, fuzzy-matches each one against Beatport search, and pulls full track metadata. Tracks with no result or score below threshold are marked on `detected_tracks.enrich_outcome` (`not_found` or `fuzzy_miss`) and skipped on future runs.
 
-Each match is written twice:
-- **`enriched_tracks`** — lean Beatport row: `bpm`, `key`, `genre`, `release_date`, `beatport_id`, `beatport_link`, `artist`, `title`, `apple_music_url`.
-- **`enriched_tracks_full`** — same fields plus full Beatport detail (`mix_name`, `label`, `catalog_number`, `isrc`, `sub_genre`, `length_ms`). Mirrored at insert time so downstream stages have everything on the same row.
+Each match writes one row to `enriched_tracks` carrying every Beatport-derived field on the same row: the basic search-result fields (`bpm`, `key`, `genre`, `release_date`, `beatport_id`, `beatport_link`, `artist`, `title`, `apple_music_url`) plus the catalog-detail extras (`mix_name`, `label`, `catalog_number`, `isrc`, `sub_genre`, `length_ms`) fetched from `/v4/catalog/tracks/{id}/`.
 
-Beatport-sourced data is fetched **only** here. Stages 5 and 6 do not call Beatport.
+Beatport-sourced data is fetched **only** here (and inline-extracted by Stage 4 from the playlist response). Stages 5 and 6 do not call Beatport.
 
 ```bash
 uv run dj_cli.py detect enrich                       # enrich all pending tracks
@@ -245,7 +252,7 @@ Log written to `~/Music/dj-tools/logs/enrich/YYYY-MM-DD_<run_id>.log`. Every oth
 
 # Stage 4 — pull Beatport library tracks directly
 
-For tracks already in your Beatport library (bought, favourited, in playlists), there is no detection step — just sync them straight into `enriched_tracks` + `enriched_tracks_full`. Useful for seeding the DB with everything you own before running the analysis stages.
+For tracks already in your Beatport library (bought, favourited, in playlists), there is no detection step — just sync them straight into `enriched_tracks`. The catalog-detail extras (`mix_name`/`label`/`isrc`/`sub_genre`/`length_ms`) are pulled inline from the same playlist response so no extra HTTP call per track is needed.
 
 ```bash
 uv run dj_cli.py detect sync-beatport
@@ -254,7 +261,7 @@ uv run dj_cli.py detect sync-beatport --limit 100
 uv run dj_cli.py detect sync-beatport --verbose
 ```
 
-Stages 3 and 4 produce identical-shaped rows in `enriched_tracks_full`. Stages 5 and 6 don't care which path a row came from.
+Stages 3 and 4 produce identical-shaped rows in `enriched_tracks`. Stages 5 and 6 don't care which path a row came from.
 
 ---
 
@@ -262,14 +269,14 @@ Stages 3 and 4 produce identical-shaped rows in `enriched_tracks_full`. Stages 5
 
 Two commands run in order:
 
-1. **`import-to-studio`** drives DJ Studio's bundled SDK headlessly to fetch + analyse tracks that aren't in DJ Studio's library yet. Writes the same `audio-library-table` + `track-structures-table` + 4 `compressedAudioView*` binaries DJ Studio writes when you analyse manually in the UI.
-2. **`enrich-studio`** reads those library files (plus anything you analysed manually in DJ Studio's UI) into `enriched_tracks_full`.
+1. **`import-to-studio`** drives DJ Studio's bundled SDK headlessly for tracks that aren't yet in DJ Studio's library. Writes the same `audio-library-table` + `track-structures-table` + 4 `compressedAudioView*` binaries DJ Studio writes when you analyse manually in the UI. **Writes only to DJ Studio's local files — does not touch our DB.**
+2. **`enrich-studio`** reads those library files (plus anything you analysed manually in DJ Studio's UI) and creates rows in `enriched_tracks_analysis`. This is the only stage that creates rows in that table.
 
 ### import-to-studio — drive DJ Studio's analysis headlessly
 
 Uses your DJ Studio account + the bundled SDK to fetch full Beatport tracks, run the same MIK + ai-beatgrid + ai-stems pipeline DJ Studio uses internally, and write real DJ Studio library entries — no UI interaction needed.
 
-**Per track captured:**
+**Per track captured (in DJ Studio's filesystem):**
 
 | Source | Output |
 |---|---|
@@ -278,7 +285,7 @@ Uses your DJ Studio account + the bundled SDK to fetch full Beatport tracks, run
 | `@appmachine/ai-stems` Demucs Fast | vocals/drums/bass/other separated → compressedAudioView amplitude tracks + per-stem RMS averages and peaks |
 | Computed | 8-bar phraseData, beat→phrase/energy mapping, bar-accent markers |
 
-(Beatport metadata — mix_name, label, catalog_number, ISRC, sub_genre, length_ms — was already fetched by Stage 3 and is on the row.)
+(Beatport metadata — mix_name, label, catalog_number, ISRC, sub_genre, length_ms — was already fetched by Stage 3 and is on `enriched_tracks`.)
 
 **Prerequisites:**
 1. **Quit DJ Studio (Cmd+Q)** before running. Its SDK conflicts with ours on port 61894 + `.beatport/` cache locks. Pre-flight check aborts with a clear message if DJ Studio is running.
@@ -297,10 +304,9 @@ uv run dj_cli.py detect import-to-studio --verbose
 
 **Flags:**
 - `--limit N`: stop after N tracks (0 = no limit).
-- `--force`: re-process tracks even if `dj_studio_at` is set. Default skips done.
-- `--keep-temp`: don't delete the temp dir of downloaded preview MP3s.
+- `--force`: re-process tracks even if they're already in DJ Studio's library.
 
-**Idempotent:** skip rule is `dj_studio_at IS NULL`. Re-runs pick up only new rows.
+**Idempotent:** skip rule is "library_key already exists in DJ Studio's `audio-library-table`". DJ Studio's filesystem is the single source of truth for "this track is imported" — we no longer track this in our DB.
 
 **Failure handling:** transient `cf.dj.studio` failures are auto-retried inside the Node helper (4 attempts, exponential backoff up to 9s). Tracks that still fail get a second pass at the end of the batch after a 5s pause. The summary distinguishes "written / recovered on retry / permanently failed" with per-track error reasons.
 
@@ -308,11 +314,11 @@ uv run dj_cli.py detect import-to-studio --verbose
 
 When you reopen DJ Studio after running, those tracks appear in your library fully analysed — same as if you'd added them to a mix and let DJ Studio process them.
 
-### enrich-studio — read DJ Studio library files into enriched_tracks_full
+### enrich-studio — read DJ Studio's library into enriched_tracks_analysis
 
-Populates `mik_key`, `mik_nrg`, `vocals`, `drums`, `melody` by reading DJ Studio's `audio-library-table` + `audio-library-compressedAudioView{Vocals,Drums,Melody}`. Skips tracks that already have `mik_key` set.
+Creates the `enriched_tracks_analysis` row for each enriched track that's present in DJ Studio's library. Reads `audio-library-table` for `mik_key` + `mik_nrg`, and `audio-library-compressedAudioView{Vocals,Drums,Melody}` for the per-stem categorical intensity. INSERT-or-UPDATE keyed on `beatport_id`; stamps `dj_studio_at` on insert.
 
-For tracks already analysed by you in DJ Studio's UI, this just reads existing data. For tracks not analysed yet, run `import-to-studio` first.
+For tracks already analysed by you in DJ Studio's UI, this just reads existing data. For tracks not in DJ Studio's library yet, run `import-to-studio` first.
 
 ```bash
 uv run dj_cli.py detect enrich-studio
@@ -321,27 +327,16 @@ uv run dj_cli.py detect enrich-studio --limit 50
 uv run dj_cli.py detect enrich-studio --verbose
 ```
 
-### Stored in `enriched_tracks_full` after Stage 5
+### Stored in `enriched_tracks_analysis` after Stage 5
 
 ```
-mik_key, mik_key_secondary, mik_key_confidence, mik_nrg
-tempo_precise, duration_sec, cue_points_count
-vocals, drums, melody                                    -- categorical low/medium/high
-vocals_avg, drums_avg, bass_avg, melody_avg              -- RMS floats
-vocals_peak, drums_peak, bass_peak, melody_peak
-analysis_json     -- {key, energy.segments[], cue_points[], tempo, structure, stems}
+beatport_id          -- PRIMARY KEY (link to enriched_tracks via JOIN)
+mik_key, mik_nrg     -- from audio-library-table
+vocals, drums, melody -- categorical low/medium/high (from compressedAudioView*)
+dj_studio_at         -- set on first INSERT
 ```
 
-Every field comes directly from DJ Studio:
-
-| Field | Source |
-|---|---|
-| `mik_key`, `mik_key_secondary`, `mik_key_confidence`, `mik_nrg` | `cf.dj.studio/mixedinkey/analyze` (DJ Studio's classifier) |
-| `analysis_json.energy.segments[]`, `cue_points[]` | `cf.dj.studio` |
-| `tempo_precise`, beat positions | `@appmachine/ai-beatgrid` (DJ Studio's bundled TorchScript model) |
-| `duration_sec`, sample rate, channel count | DJ Studio SDK `getTrackAudioInformation` |
-| `vocals`/`drums`/`melody` (categorical) | `enrich-studio` reading DJ Studio's `compressedAudioView*` files |
-| `vocals_avg/peak`, `drums_avg/peak`, etc. (floats) | RMS over `@appmachine/ai-stems` Demucs output |
+The schema also reserves columns for `mik_key_secondary`, `mik_key_confidence`, `tempo_precise`, `duration_sec`, `cue_points_count`, the per-stem `*_avg`/`*_peak` RMS floats, and `analysis_json` — these are populated only if a future enrich-studio enhancement reads them out of DJ Studio's library files. Today they stay NULL.
 
 **Not stored** (intentionally): semantic phrase labels (intro/chorus/breakdown/etc.). DJ Studio doesn't produce those — its renderer never calls the dormant ML phrase model and real `track-structures-table.phraseData` arrays are empty. For real labelled phrases use Stage 6.
 
@@ -353,7 +348,7 @@ Rekordbox's automatic Analyze produces semantic phrase labels (Intro / Verse / C
 
 1. **`export-to-rekordbox`** pushes tracks into a rekordbox playlist as Beatport streaming entries.
 2. Manually open rekordbox → playlist → right-click → **Analyze Tracks**.
-3. **`import-rekordbox-analysis`** reads the resulting ANLZ files (PSSI + cues) into `enriched_tracks_full.rk_analysis_json`.
+3. **`import-rekordbox-analysis`** reads the resulting ANLZ files (PSSI + cues) into `enriched_tracks_analysis.rk_analysis_json`.
 
 ### export-to-rekordbox — push tracks into a rekordbox playlist
 
@@ -374,7 +369,7 @@ Open rekordbox, find the playlist, select all tracks, right-click → **Analyze 
 
 ### import-rekordbox-analysis — read ANLZ data into rk_analysis_json
 
-Reads each track's ANLZ file and saves a JSON blob into `enriched_tracks_full.rk_analysis_json`:
+Reads each track's ANLZ file and saves a JSON blob into `enriched_tracks_analysis.rk_analysis_json`:
 
 | Source | Field |
 |---|---|
@@ -447,24 +442,25 @@ uv run dj_cli.py detect enrich-tracks mixcloud 7
 uv run dj_cli.py detect enrich-tracks youtube 3 --misses     # only not_found / fuzzy_miss
 ```
 
-Use `detect sessions <type>` to find session IDs.
+Use `detect sessions <type>` to find session IDs. `detect sessions <type> <id>` shows the raw `detected_tracks` for that scan; `detect enrich-tracks <type> <id>` shows the same set but with their Beatport-enrichment status joined in.
 
 ---
 
 ## playlist — SQL → Beatport / rekordbox / DJ Studio
 
-Take any SQL query against `enriched_tracks_full` (or the lean legacy `enriched_tracks`) and push the matching tracks to one of three destinations. The query must `SELECT beatport_id` — anything else returned is ignored. The full row is re-fetched from `enriched_tracks_full` for use during the push (so artist/title/genre/key/bpm/duration come from there).
+Take any SQL query that returns `beatport_id` and push the matching tracks to one of three destinations. The push code re-fetches each row via `enriched_tracks LEFT JOIN enriched_tracks_analysis USING(beatport_id)` so artist/title/genre/key/bpm/length_ms are always available, regardless of how the user wrote their SQL.
 
 ```bash
 # Beatport — creates the playlist if it doesn't exist; dedups against existing tracks
 uv run dj_cli.py playlist beatport \
-  --query "SELECT beatport_id FROM enriched_tracks_full WHERE genre='Tech House' AND mik_nrg>=7 ORDER BY tempo_precise" \
+  --query "SELECT beatport_id FROM enriched_tracks WHERE genre='Tech House' AND bpm BETWEEN 124 AND 128 ORDER BY bpm" \
   --name "Peak Tech House"
 
 # Rekordbox — creates the playlist; pushes bare Beatport streaming entries (FileType=20).
 # Doesn't push cues. Quit rekordbox first.
+# Filter on analysis-table columns by JOINing yourself:
 uv run dj_cli.py playlist rekordbox \
-  --query "SELECT beatport_id FROM enriched_tracks_full WHERE rk_analysis_json LIKE '%\"mood_name\":\"High%' LIMIT 30" \
+  --query "SELECT e.beatport_id FROM enriched_tracks e JOIN enriched_tracks_analysis a USING(beatport_id) WHERE a.rk_analysis_json LIKE '%\"mood_name\":\"High%' LIMIT 30" \
   --name "High-mood set"
 
 # DJ Studio — writes a new mix project file with linear track ordering and empty
@@ -472,15 +468,15 @@ uv run dj_cli.py playlist rekordbox \
 # must already be in DJ Studio's library — run `dj detect import-to-studio` first
 # if any of the matched beatport_ids haven't been imported yet.
 uv run dj_cli.py playlist dj-studio \
-  --query "SELECT beatport_id FROM enriched_tracks_full WHERE bpm BETWEEN 124 AND 128" \
+  --query "SELECT beatport_id FROM enriched_tracks WHERE bpm BETWEEN 124 AND 128" \
   --name "124-128 BPM warmup"
 
 # All three accept --dry-run.
 ```
 
-**Validation:** the query must start with `SELECT`, must reference `beatport_id`, and beatport_ids missing from `enriched_tracks_full` are reported and skipped.
+**Validation:** the query must start with `SELECT`. After fetch, if no `beatport_id` column is in the result set, the call errors. beatport_ids missing from `enriched_tracks` are reported and skipped.
 
-**Difference from `detect export-to-rekordbox`:** that one is the idempotent Stage 6a that pushes everything pending in `enriched_tracks_full` (where `rekordbox_export_at IS NULL`) and stamps the timestamp on success. `playlist rekordbox` is ad-hoc curation by SQL — no pipeline-stamp side effects.
+**Difference from `detect export-to-rekordbox`:** that one is the idempotent Stage 6a that pushes everything in `enriched_tracks_analysis` where `rekordbox_export_at IS NULL` (i.e., already through enrich-studio but not yet pushed) and stamps the timestamp on success. `playlist rekordbox` is ad-hoc curation by SQL — no pipeline-stamp side effects, and it works against any track in `enriched_tracks` whether or not it's been through enrich-studio.
 
 ---
 
@@ -521,8 +517,8 @@ All tables live in `~/Music/dj-tools/dj.db`.
 | `detected_tracks` | Stage 2 (`detect`) | One row per unique track. `enrich_outcome` records miss state (`not_found`, `fuzzy_miss`). Deduped by Shazam key or artist+title. |
 | `sessions` | Stage 2 (`detect`) | One row per unique URL scanned (youtube, mixcloud, radio, instagram, podbean, reddit). Tracks scan progress and resume position. |
 | `track_sessions` | Stage 2 (`detect`) | Junction: maps each track to the session(s) it appeared in, with timestamp position. |
-| `enriched_tracks` | Stage 3 (`detect enrich`), Stage 4 (`detect sync-beatport`) | Lean Beatport-matched tracks (legacy): id, detected_track_id, beatport_id, beatport_link, bpm, key, genre, release_date, artist, title, apple_music_url, created_at. |
-| `enriched_tracks_full` | Stages 3, 4, 5, 6 | Canonical full-data table. Mirrored from `enriched_tracks` on insert (Stage 3/4), then progressively filled by Stage 5 and Stage 6. Includes the lean columns plus full Beatport metadata (mix_name, label, catalog_number, isrc, sub_genre, length_ms), DJ Studio analysis (mik_key, mik_key_secondary, mik_key_confidence, mik_nrg, tempo_precise, duration_sec, cue_points_count, vocals/drums/bass/melody categorical + {avg,peak} RMS, analysis_json), rekordbox round-trip (rk_analysis_json), and per-stage timestamps (dj_studio_at, rekordbox_export_at, rekordbox_analysis_at). |
+| `enriched_tracks` | Stage 3 (`detect enrich`), Stage 4 (`detect sync-beatport`) | All Beatport-derived data on one row: id, detected_track_id, beatport_id, beatport_link, bpm, key, genre, release_date, artist, title, apple_music_url, enriched_at, plus the catalog-detail extras (mix_name, label, catalog_number, isrc, sub_genre, length_ms). |
+| `enriched_tracks_analysis` | Stage 5b (`detect enrich-studio`) creates rows; Stage 6a/6b update them | Sparse — only tracks that have been through enrich-studio. Keyed on `beatport_id` (PK). Carries the DJ Studio analysis fields (mik_key, mik_nrg, vocals, drums, melody, plus reserved columns mik_key_secondary, mik_key_confidence, tempo_precise, duration_sec, cue_points_count, vocals/drums/bass/melody {avg,peak}, analysis_json), rekordbox round-trip (rk_analysis_json), and per-stage timestamps (dj_studio_at, rekordbox_export_at, rekordbox_analysis_at). JOIN with `enriched_tracks` for the basic+catalog fields. |
 | `enrich_runs` | Stage 3 (`detect enrich`) | Per-run summary: seen / found / not_found / fuzzy_miss / status. |
 | `deleted_sessions` | `detect *-delete-session` | Audit log of deleted sessions. |
 | `synced_tracks` | Stage 1 (`sync`) | Tracks synced to Beatport with outcome (added / duplicate / fuzzy_miss / no_classify). |
@@ -583,11 +579,13 @@ detect/                         Track detection + enrichment pipeline (Stages 2-
   db.py                         All detect + enrich DB operations
   cli.py                        argparse subcommands + async dispatch
   enrich.py                     Stage 3: detected → Beatport metadata (incl. full track-detail)
-  sync_beatport.py              Stage 4: pull Beatport library → enriched_tracks_full
-  import_to_studio.py           Stage 5a: drive DJ Studio's bundled SDK headlessly
+  sync_beatport.py              Stage 4: pull Beatport library → enriched_tracks
+  import_to_studio.py           Stage 5a: drive DJ Studio's bundled SDK headlessly;
+                                writes ONLY to DJ Studio's local files
   dj_studio_sdk.js              Long-running Node helper for Stage 5a (MIK WASM,
                                 ai-beatgrid, ai-stems Demucs, cf.dj.studio classifier)
-  enrich_studio.py              Stage 5b: read DJ Studio library files
+  enrich_studio.py              Stage 5b: read DJ Studio library, INSERT into
+                                enriched_tracks_analysis (creation point)
   export_to_rekordbox.py        Stage 6a: pending → rekordbox playlist (idempotent)
   import_rekordbox_analysis.py  Stage 6b: ingest PSSI + cues from ANLZ files
   instagram.py / mixcloud.py / youtube.py / radio.py / podbean.py / reddit.py

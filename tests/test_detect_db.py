@@ -293,12 +293,60 @@ def test_get_studio_enrichable_tracks(tmp_db):
     rows = db.get_studio_enrichable_tracks()
     assert len(rows) == 1
     assert rows[0]["artist"] == "A"
+    assert rows[0]["beatport_id"] == 10
 
 
-def test_update_studio_enrich(tmp_db):
-    pid = db.upsert_beatport_playlist(1, "PL")
-    db.insert_beatport_track("A", "T", "https://bp.com/t/t/10", {"beatport_id": 10}, playlist_id=pid)
-    rows = db.get_studio_enrichable_tracks()
-    db.update_studio_enrich(rows[0]["id"], {"mik_key": "8B", "mik_nrg": 7.5, "vocals": "low", "drums": "high", "melody": "mid"})
-    remaining = db.get_studio_enrichable_tracks()
-    assert len(remaining) == 0
+def test_upsert_analysis_creates_row(tmp_db):
+    db.upsert_analysis(10, {"mik_key": "8B", "mik_nrg": 7.5,
+                            "vocals": "low", "drums": "high", "melody": "mid"})
+    con = sqlite3.connect(tmp_db)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT * FROM enriched_tracks_analysis WHERE beatport_id = 10"
+    ).fetchone()
+    con.close()
+    assert row is not None
+    assert row["mik_key"] == "8B"
+    assert row["mik_nrg"] == 7.5
+    assert row["vocals"] == "low"
+    assert row["dj_studio_at"] is not None
+
+
+def test_upsert_analysis_updates_existing_row_preserves_other_fields(tmp_db):
+    db.upsert_analysis(10, {"mik_key": "8B", "mik_nrg": 7.5,
+                            "vocals": "low", "drums": "high", "melody": "mid"})
+    db.upsert_analysis(10, {"mik_nrg": 9.0})
+    con = sqlite3.connect(tmp_db)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT mik_key, mik_nrg, vocals FROM enriched_tracks_analysis WHERE beatport_id = 10"
+    ).fetchone()
+    con.close()
+    assert row["mik_key"] == "8B"   # preserved
+    assert row["mik_nrg"] == 9.0    # updated
+    assert row["vocals"] == "low"   # preserved
+
+
+def test_mark_pipeline_done_rejects_dj_studio_at(tmp_db):
+    import pytest
+    with pytest.raises(ValueError, match="Unsupported column"):
+        db.mark_pipeline_done(10, "dj_studio_at")
+
+
+def test_upsert_analysis_handles_all_none_fields(tmp_db):
+    """A library entry that DJ Studio created but hasn't analysed yet has
+    every field None — must not blow up on the SQL."""
+    db.upsert_analysis(10, {"mik_key": None, "mik_nrg": None,
+                            "vocals": None, "drums": None, "melody": None})
+    con = sqlite3.connect(tmp_db)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT * FROM enriched_tracks_analysis WHERE beatport_id = 10"
+    ).fetchone()
+    con.close()
+    assert row is not None
+    assert row["dj_studio_at"] is not None
+    assert row["mik_key"] is None
+    # Re-running with still-empty data is also a no-op (DO NOTHING path).
+    db.upsert_analysis(10, {})
+    db.upsert_analysis(10, {"mik_key": None})

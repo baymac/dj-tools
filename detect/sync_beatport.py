@@ -43,6 +43,25 @@ def _track_meta(track: dict) -> dict:
     }
 
 
+def _track_extras(track: dict) -> dict:
+    """Pull the full-track-detail fields off the playlist response.
+
+    Beatport's playlist-items endpoint returns these inline, so no extra HTTP
+    call is needed. Missing fields stay None and the caller's COALESCE keeps
+    any pre-existing values intact.
+    """
+    label_obj = (track.get("release") or {}).get("label") or {}
+    sub_genre_obj = track.get("sub_genre") or {}
+    return {
+        "mix_name": track.get("mix_name"),
+        "label": label_obj.get("name") if isinstance(label_obj, dict) else None,
+        "catalog_number": track.get("catalog_number"),
+        "isrc": track.get("isrc"),
+        "sub_genre": sub_genre_obj.get("name") if isinstance(sub_genre_obj, dict) else None,
+        "length_ms": track.get("length_ms"),
+    }
+
+
 def _extract_track(item: dict) -> dict | None:
     track = item.get("track") or {}
     if not track.get("id"):
@@ -157,6 +176,7 @@ def _run_sync_beatport_impl(
                 artist = ", ".join(a for a in artists if a) or "Unknown"
                 title = track.get("name") or "Unknown"
                 meta = _track_meta(track)
+                extras = _track_extras(track)
 
                 if not meta["beatport_link"]:
                     total_failed += 1
@@ -176,6 +196,7 @@ def _run_sync_beatport_impl(
 
                 acted = detect_db.insert_beatport_track(
                     artist, title, meta["beatport_link"], meta,
+                    extras=extras,
                     playlist_id=local_playlist_id,
                 )
                 if acted:

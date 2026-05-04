@@ -87,15 +87,14 @@ def _read_stems(library_key: str) -> dict:
     return result
 
 
-def run_enrich_studio(dry_run: bool, limit: int, verbose: bool) -> None:
+def run_enrich_studio(dry_run: bool, limit: int, verbose: bool, force: bool = False) -> None:
     from paths import command_logger
     with command_logger("enrich-studio", console) as log_path:
         console.print(f"[dim]Log: {log_path}[/dim]")
-        _run_enrich_studio_impl(dry_run, limit, verbose)
+        _run_enrich_studio_impl(dry_run, limit, verbose, force)
 
 
-def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool) -> None:
-    table = "enriched_tracks_full"
+def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool, force: bool) -> None:
     if dry_run:
         console.print("[yellow]DRY RUN[/yellow] — no changes will be made")
 
@@ -115,12 +114,18 @@ def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool) -> None:
         tracks = tracks[:limit]
 
     if not tracks:
-        console.print("Nothing to enrich — all matched tracks already have DJ Studio data.")
+        console.print("Nothing to enrich — no enriched tracks have a Beatport ID.")
         return
 
-    console.print(f"[bold]{len(tracks)}[/bold] tracks to enrich with DJ Studio data  [dim]({table})[/dim]")
+    already_done = set() if force else detect_db.existing_analysis_beatport_ids()
+    console.print(
+        f"[bold]{len(tracks)}[/bold] enriched tracks to check against DJ Studio's library"
+        f"  ({len(already_done)} already in enriched_tracks_analysis"
+        + (", forced re-run" if force else ", will skip")
+        + ")"
+    )
 
-    counts = {"seen": 0, "updated": 0, "not_in_library": 0}
+    counts = {"seen": 0, "updated": 0, "already_done": 0, "not_in_library": 0}
 
     progress = Progress(
         SpinnerColumn(),
@@ -140,11 +145,14 @@ def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool) -> None:
             progress.update(task, advance=1)
 
             beatport_id = row["beatport_id"]
-            enriched_id = row["id"]
             artist = row["artist"] or ""
             title = row["title"] or ""
 
             progress.update(task, description=f"{artist} — {title}")
+
+            if beatport_id in already_done:
+                counts["already_done"] += 1
+                continue
 
             lib_key = f"beatport-sdk_{beatport_id}"
             track = library.get(lib_key)
@@ -174,21 +182,28 @@ def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool) -> None:
                 "melody": stems.get("melody"),
             }
 
+            if not any(v is not None for v in data.values()):
+                # DJ Studio has a library entry for this track but hasn't
+                # analysed it yet — nothing to write.
+                if verbose:
+                    progress.log(f"[dim]no analysis yet:[/dim] {artist} — {title}  (bp:{beatport_id})")
+                continue
+
             if dry_run:
                 if verbose:
                     progress.log(
-                        f"[green]would update:[/green] {artist} — {title}  "
+                        f"[green]would upsert:[/green] {artist} — {title}  "
                         f"key={mik_key} nrg={mik_nrg} "
                         f"vocals={stems.get('vocals')} drums={stems.get('drums')} melody={stems.get('melody')}"
                     )
                 counts["updated"] += 1
                 continue
 
-            detect_db.update_studio_enrich(enriched_id, data)
+            detect_db.upsert_analysis(beatport_id, data)
             counts["updated"] += 1
             if verbose:
                 progress.log(
-                    f"[green]updated:[/green] {artist} — {title}  "
+                    f"[green]upserted:[/green] {artist} — {title}  "
                     f"key={mik_key} nrg={mik_nrg} "
                     f"vocals={stems.get('vocals')} drums={stems.get('drums')} melody={stems.get('melody')}"
                 )
@@ -197,4 +212,5 @@ def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool) -> None:
     console.print(f"[bold]Enrich-studio {'(dry run) ' if dry_run else ''}complete[/bold]")
     console.print(f"  Seen:            {counts['seen']}")
     console.print(f"  Updated:         {counts['updated']}")
+    console.print(f"  Already done:    {counts['already_done']}")
     console.print(f"  Not in library:  {counts['not_in_library']}")

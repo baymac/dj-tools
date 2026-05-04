@@ -82,6 +82,36 @@ MIK_CAMELOT_STR_TO_INT = {v: k for k, v in MIK_CAMELOT_INT_TO_STR.items()}
 KIND = "beatport-sdk"
 
 
+def _existing_library_keys() -> set[str]:
+    """Return library_keys for entries that have completed analysis.
+
+    DJ Studio's filesystem is the single source of truth for "is this track
+    already imported AND analysed". An entry counts as done only if `mikKey`
+    (or its alias `camelotKey`) is set — entries written before cf.dj.studio
+    classified them have those fields NULL and should be retried.
+    """
+    keys: set[str] = set()
+    if not DJ_STUDIO_LIBRARY.is_dir():
+        return keys
+    for shard in DJ_STUDIO_LIBRARY.iterdir():
+        if not shard.is_dir():
+            continue
+        for f in shard.iterdir():
+            if not f.is_file():
+                continue
+            try:
+                data = json.loads(f.read_text())
+            except Exception:
+                continue
+            k = data.get("key")
+            if not k:
+                continue
+            if data.get("mikKey") is None and data.get("camelotKey") is None:
+                continue  # entry exists but cf.dj.studio never classified it
+            keys.add(k)
+    return keys
+
+
 # ── 1. DJ Studio process guard ────────────────────────────────────────────────
 
 def is_dj_studio_running() -> bool:
@@ -596,7 +626,6 @@ def run_import_to_studio(
 def _run_import_to_studio_impl(
     *, limit: int, verbose: bool, force: bool,
 ) -> None:
-    table = "enriched_tracks_full"
     if is_dj_studio_running():
         console.print(
             "[red]DJ Studio is currently running.[/red]\n"
@@ -605,14 +634,23 @@ def _run_import_to_studio_impl(
         )
         return
 
-    console.print(f"[bold]import-to-studio[/bold] ← [cyan]{table}[/cyan]  (Path A: full tracks via DJ Studio SDK)")
+    console.print("[bold]import-to-studio[/bold]  (Path A: full tracks via DJ Studio SDK)")
 
-    rows = detect_db.get_import_to_studio_pending(force=force)
+    candidates = detect_db.get_import_to_studio_pending(force=force)
+
+    # Filter out tracks already in DJ Studio's audio-library-table — DJ Studio's
+    # filesystem is the single source of truth for "is this track imported".
+    library_keys = _existing_library_keys()
+    if force:
+        rows = list(candidates)
+    else:
+        rows = [r for r in candidates if f"{KIND}_{r['beatport_id']}" not in library_keys]
+
     if limit:
         rows = rows[:limit]
     if not rows:
         console.print(
-            "Nothing to import — every track in this table already has dj_studio_at set.\n"
+            "Nothing to import — every enriched track is already in DJ Studio's library.\n"
             "[dim]Use --force to re-process all tracks.[/dim]"
         )
         return
@@ -637,7 +675,9 @@ def _run_import_to_studio_impl(
     )
 
     def _process_one(row, helper, *, attempt_label: str = "") -> tuple[bool, str]:
-        """Returns (ok, error_message). Side-effect: writes to DJ Studio + enriched_tracks_test."""
+        """Returns (ok, error_message). Side-effect: writes to DJ Studio's local
+        library files only — NOT to our DB. `dj detect enrich-studio` reads
+        those files back and creates the enriched_tracks_analysis row."""
         bid = row["beatport_id"]
         artist = row["artist"] or ""
         title = row["title"] or ""
@@ -648,7 +688,6 @@ def _run_import_to_studio_impl(
 
         shaped = _shape_result(bid, res["result"])
         if shaped is None:
-            # Surface the underlying classifier body for debugging
             srv = (res.get("result") or {}).get("server") or {}
             return False, f"classifier ok={srv.get('ok')} status={srv.get('status')} body={str(srv.get('body'))[:120]}"
 
@@ -662,14 +701,6 @@ def _run_import_to_studio_impl(
         _write_compressed_view(DJ_STUDIO_DRUMS,  library_key, stems_b64.get("drums"))
         _write_compressed_view(DJ_STUDIO_BASS,   library_key, stems_b64.get("bass"))
         _write_compressed_view(DJ_STUDIO_MELODY, library_key, stems_b64.get("other"))
-
-        # Beatport catalog metadata (label/ISRC/etc.) is now fetched up-front
-        # by `dj detect enrich` and persisted on enriched_tracks_full. We only
-        # write the analysis-derived rich fields here.
-        rich = dict(shaped["rich"])
-        rich["analysis_json"] = shaped["analysis_json"]
-        detect_db.update_enriched_rich(bid, rich)
-        detect_db.mark_pipeline_done(bid, "dj_studio_at")
 
         if verbose:
             t = res["result"].get("timing_ms", {})
@@ -738,5 +769,4 @@ def _run_import_to_studio_impl(
             r = fr["row"]
             console.print(f"  bp:{r['beatport_id']} — {r['artist']} — {r['title']}: {fr['error'][:200]}")
     if counts["ok"]:
-        flag = "  --test" if "test" in table else ""
-        console.print(f"[dim]Next:[/dim] [cyan]uv run dj_cli.py detect enrich-studio{flag}[/cyan]")
+        console.print("[dim]Next:[/dim] [cyan]uv run dj_cli.py detect enrich-studio[/cyan]")

@@ -277,13 +277,9 @@ def run_enrich(
                 counts["found"] += 1
                 continue
 
-            detect_db.upsert_enriched(track_id, meta)
-
-            # Also fetch full Beatport catalog metadata + upsert into
-            # enriched_tracks_full. This lands every newly-enriched track in the
-            # canonical full-data table with label/ISRC/sub_genre/etc. already
-            # populated, so import-to-studio doesn't need a separate metadata
-            # fetch later.
+            # Fetch full Beatport catalog detail before upserting so the lean
+            # row in enriched_tracks gets label/ISRC/sub_genre/etc. on the
+            # initial INSERT.
             extras = {}
             try:
                 full_track = beatport.get_track(meta["beatport_id"])
@@ -299,26 +295,9 @@ def run_enrich(
                         "length_ms": full_track.get("length_ms"),
                     }
             except Exception:
-                pass  # Beatport metadata is non-critical; basic enrich already succeeded.
+                pass  # Non-critical — basic enrich still succeeds with empty extras.
 
-            basic = {
-                "beatport_link": meta.get("beatport_link"),
-                "bpm": meta.get("bpm"),
-                "key": meta.get("key"),
-                "genre": meta.get("genre"),
-                "release_date": meta.get("release_date"),
-                "artist": artist,
-                "title": title,
-            }
-            try:
-                detect_db.upsert_full_from_enrich(
-                    detected_track_id=track_id,
-                    beatport_id=meta["beatport_id"],
-                    basic=basic,
-                    extras=extras,
-                )
-            except Exception as e:
-                _log(f"upsert_full_failed  bp:{meta['beatport_id']}  {e}")
+            detect_db.upsert_enriched(track_id, meta, extras=extras)
 
             counts["found"] += 1
             _log(

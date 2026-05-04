@@ -1105,11 +1105,13 @@ Examples:
                       help="Stop after N tracks (0 = no limit)")
     es_p.add_argument("--verbose", "-v", action="store_true",
                       help="Print per-track update details")
+    es_p.add_argument("--force", action="store_true",
+                      help="Re-upsert tracks already in enriched_tracks_analysis (default: skip)")
 
     # import-to-studio
     its_p = sub.add_parser(
         "import-to-studio",
-        help="Drive DJ Studio analysis (key/energy/cuepoints/beatgrid/stems) → write enriched_tracks_full + DJ Studio library",
+        help="Drive DJ Studio analysis (key/energy/cuepoints/beatgrid/stems) → DJ Studio's local library files",
     )
     its_p.add_argument("--limit", type=int, default=0, metavar="N",
                        help="Stop after N tracks (0 = no limit)")
@@ -1120,7 +1122,7 @@ Examples:
     # export-to-rekordbox
     etr_p = sub.add_parser(
         "export-to-rekordbox",
-        help="Push enriched_tracks_full into a rekordbox playlist as Beatport streaming entries (for manual analysis)",
+        help="Push enrich-studio'd tracks into a rekordbox playlist as Beatport streaming entries (for manual analysis)",
     )
     etr_p.add_argument("--playlist", default="DJ Tools - Enrich",
                        help="Playlist name in rekordbox (created if missing)")
@@ -1141,9 +1143,14 @@ Examples:
 
     # sessions
     _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit")
-    sess_p = sub.add_parser("sessions", help="List all sessions for a source type")
+    sess_p = sub.add_parser(
+        "sessions",
+        help="List all sessions for a source type, or detected tracks for one session",
+    )
     sess_p.add_argument("type", choices=_TYPES, metavar="TYPE",
                         help=f"Source type: {', '.join(_TYPES)}")
+    sess_p.add_argument("session_id", nargs="?", type=int, default=None,
+                        help="If given, show detected tracks for this session id; else list sessions.")
     sess_p.add_argument("-n", "--limit", type=int, default=20)
 
     # enriched
@@ -1662,7 +1669,8 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
     elif cmd == "enrich-studio":
         from detect.enrich_studio import run_enrich_studio
-        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose)
+        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose,
+                          force=args.force)
 
     elif cmd == "import-to-studio":
         from detect.import_to_studio import run_import_to_studio
@@ -1690,6 +1698,40 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         )
 
     elif cmd == "sessions":
+        if args.session_id is not None:
+            sess = next((s for s in list_sessions(args.type, 10000) if s["id"] == args.session_id), None)
+            if sess is None:
+                console.print(f"[red]No {args.type} session #{args.session_id}.[/red]")
+                return
+            tracks = tracks_for_session(args.session_id)
+            console.print(
+                f"\n[bold cyan]Session #{sess['id']}[/bold cyan]  [bold]{sess['title'] or '—'}[/bold]\n"
+                f"  [dim]url:[/dim] {sess['url']}\n"
+                f"  [dim]uploader:[/dim] {sess['uploader'] or '?'}  "
+                f"[dim]scanned:[/dim] {sess['started_at'][:19]}  "
+                f"[dim]tracks:[/dim] {len(tracks)}"
+            )
+            if not tracks:
+                console.print("\n[dim](no tracks detected)[/dim]")
+                return
+            t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+            t.add_column("Pos", style="dim", width=8)
+            t.add_column("Artist", min_width=22)
+            t.add_column("Title", min_width=28)
+            t.add_column("Apple Music", min_width=38)
+            t.add_column("Outcome", style="dim", width=12)
+            for r in tracks:
+                pos = r["position"]
+                pos_s = _fmt_time(pos) if isinstance(pos, int) else (str(pos) if pos else "—")
+                t.add_row(
+                    pos_s,
+                    r["artist"] or "—",
+                    r["title"] or "—",
+                    r["apple_music_url"] or "—",
+                    r["enrich_outcome"] or "—",
+                )
+            console.print(t)
+            return
         rows = list_sessions(args.type, args.limit)
         if not rows:
             console.print(f"[dim]No {args.type} sessions yet.[/dim]")

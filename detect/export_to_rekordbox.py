@@ -1,11 +1,12 @@
 """Idempotent push: Stage 6a of the enrichment pipeline.
 
-Reads tracks from enriched_tracks_full where rekordbox_export_at IS NULL and
-pushes them to a rekordbox playlist via `playlist.to_rekordbox`. Marks each
-track's `rekordbox_export_at` on success so re-runs only pick up new rows.
+Reads tracks from enriched_tracks_analysis where rekordbox_export_at IS NULL
+(i.e., already through Stage 5b enrich-studio but not yet pushed) and sends
+them to a rekordbox playlist via `playlist.to_rekordbox`. Marks each track's
+rekordbox_export_at on success so re-runs only pick up new rows.
 
-For ad-hoc curated playlist pushes, use `dj playlist rekordbox` instead — it
-takes a SQL query and doesn't touch the pipeline timestamps.
+For ad-hoc curated playlist pushes, use `dj playlist rekordbox` — it takes a
+SQL query and doesn't touch the pipeline timestamps.
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ def _export_to_rekordbox_impl(
         rows = rows[:limit]
     if not rows:
         console.print(
-            "Nothing to export — every track in enriched_tracks_full already has rekordbox_export_at set.\n"
+            "Nothing to export — every Stage-5b row already has rekordbox_export_at set,\n"
+            "or no tracks have been through enrich-studio yet.\n"
             "[dim]Use --force to re-push all tracks.[/dim]"
         )
         return

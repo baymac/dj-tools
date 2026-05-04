@@ -25,7 +25,7 @@ detect/                         Track detection + enrichment pipeline (Stages 2-
   db.py                         All detect+enrich DB operations
   cli.py                        argparse subcommands + async dispatch
   enrich.py                     Stage 3: detected → Beatport metadata (also full track-detail)
-  sync_beatport.py              Stage 4: pull Beatport library → enriched_tracks_full
+  sync_beatport.py              Stage 4: pull Beatport library → enriched_tracks
   import_to_studio.py           Stage 5a: drive DJ Studio SDK headlessly
   dj_studio_sdk.js              Long-running Node helper for Stage 5a
   enrich_studio.py              Stage 5b: read DJ Studio library files
@@ -81,7 +81,7 @@ uv run dj_cli.py detect export-to-rekordbox
 uv run dj_cli.py detect import-rekordbox-analysis
 
 # SQL → playlist (any of the three destinations)
-uv run dj_cli.py playlist beatport  --query "SELECT beatport_id FROM enriched_tracks_full WHERE ..." --name "..."
+uv run dj_cli.py playlist beatport  --query "SELECT beatport_id FROM enriched_tracks WHERE ..." --name "..."
 uv run dj_cli.py playlist rekordbox --query "..." --name "..."
 uv run dj_cli.py playlist dj-studio --query "..." --name "..."
 
@@ -93,19 +93,20 @@ uv run helpers/cleanup_playlist.py "Playlist Name" --dry-run
 
 ### Enrichment pipeline (detect + sync)
 
-- **Two enriched tables** — `enriched_tracks` (lean legacy) + `enriched_tracks_full` (canonical). Stages 3 + 4 mirror lean rows into the full table on insert via `upsert_full_from_enrich`. Stages 5 and 6 only update the full table.
-- **Beatport metadata in one place** — Full track-detail (label, ISRC, mix_name, sub_genre, length_ms, catalog_number) is fetched **only** in `detect/enrich.py`. Stages 5 and 6 must not call Beatport. Reason: `import-to-studio` already runs a long Node helper; an extra Beatport client + token-refresh path there is what caused the prior mid-run token-expiry incident.
-- **Per-stage idempotency** — `enriched_tracks_full` carries `dj_studio_at`, `rekordbox_export_at`, `rekordbox_analysis_at`. Each stage's pending-query filters on its own `*_at IS NULL`. `--force` overrides.
+- **Two enriched tables, no mirror** — `enriched_tracks` carries everything Beatport-derived (basic search-result fields + the 6 catalog-detail extras). `enriched_tracks_analysis` is sparse: keyed on `beatport_id`, holds only DJ Studio + rekordbox analysis data (mik_key, mik_nrg, vocals/drums/melody, rk_analysis_json) plus the per-stage timestamps. A row exists in the analysis table only after `enrich-studio` has populated it. Joins (e.g., `enriched_tracks LEFT JOIN enriched_tracks_analysis USING(beatport_id)`) build the full picture at query time.
+- **Beatport metadata in one place** — Full track-detail (label, ISRC, mix_name, sub_genre, length_ms, catalog_number) is fetched **only** in `detect/enrich.py` (and inline-extracted from playlist responses by `detect/sync_beatport.py`) and lands directly on `enriched_tracks`. Stages 5 and 6 must not call Beatport. Reason: `import-to-studio` already runs a long Node helper; an extra Beatport client + token-refresh path there is what caused the prior mid-run token-expiry incident.
+- **import-to-studio writes only to DJ Studio's filesystem** — Stage 5a does NOT touch our DB. The pending-check is "does `beatport-sdk_<id>` exist in DJ Studio's `audio-library-table`" — DJ Studio's own filesystem is the single source of truth for "this track is imported".
+- **enrich-studio is the analysis-table creation point** — Stage 5b reads back from DJ Studio's library files and INSERT-or-UPDATEs `enriched_tracks_analysis` via `upsert_analysis(beatport_id, fields)` (stamps `dj_studio_at` automatically on insert).
+- **mark_pipeline_done only handles rekordbox stamps** — `dj_studio_at` is set by `upsert_analysis`, not by the caller. Valid columns are `rekordbox_export_at` (Stage 6a) and `rekordbox_analysis_at` (Stage 6b). Passing anything else raises.
 - **DJ Studio analysis is headless via SDK** — `detect/import_to_studio.py` decrypts DJ Studio's local refresh token (AES-256-CBC, hardcoded key in `encryptedToken-v2.dat`), exchanges it for a JWT via `app-services.dj.studio`, then drives `dj_studio_sdk.js` (a long-running Node helper that loads `@appmachine/beatport-sdk` + `@appmachine/ai-stems` + `@appmachine/ai-beatgrid` + the MIK WASM extractor and calls `cf.dj.studio/mixedinkey/analyze`). DJ Studio must be quit (port 61894 + `.beatport/` cache locks).
 - **No phrase labels from DJ Studio** — DJ Studio's `track-structures-table.phraseData` is always empty (the renderer never calls the dormant ML phrase model). Real semantic phrase labels (Intro/Verse/Chorus/Outro/Up/Down/Bridge) come exclusively from Stage 6's rekordbox PSSI tag.
-- **Rekordbox round-trip = three steps** — `export-to-rekordbox` pushes bare Beatport streaming entries (`FileType=20`) into a named playlist with no cue points (those would shadow rekordbox's own analysis output). Manual: open rekordbox → right-click playlist → Analyze Tracks. Then `import-rekordbox-analysis` reads PSSI + PCO2/PCOB into `rk_analysis_json`.
-- **insert_beatport_track mirror-write must run outside the outer txn** — Stage 4 writes to `enriched_tracks` inside a `with _connect()` write txn. The mirror-write to `enriched_tracks_full` opens its own `_connect()`. SQLite deadlocks if the inner connection runs while the outer holds a write lock — so the mirror call lives **after** the outer `with` exits. Don't fold it back inside.
-- **Beatport access token refresh** — `BEATPORT_ACCESS_TOKEN` ~10 min, `BEATPORT_SESSION_TOKEN` ~32 days. The session token auto-refreshes the access token on 401. Don't add manual refresh wrappers around individual stages.
+- **Rekordbox round-trip = three steps** — `export-to-rekordbox` pushes bare Beatport streaming entries (`FileType=20`) into a named playlist with no cue points (those would shadow rekordbox's own analysis output). Manual: open rekordbox → right-click playlist → Analyze Tracks. Then `import-rekordbox-analysis` reads PSSI + PCO2/PCOB into `rk_analysis_json`. Both stages JOIN `enriched_tracks_analysis` with `enriched_tracks` for the artist/title/key/bpm fields they need.
+- **Beatport access token refresh** — `BEATPORT_ACCESS_TOKEN` ~10 min, `BEATPORT_SESSION_TOKEN` ~32 days. The session token auto-refreshes the access token on 401. Don't add manual refresh wrappers around individual stages. `connections/beatport.refresh_via_session(verbose=True)` (or `BEATPORT_DEBUG=1`) prints the real cause when refresh fails — usually means the persistent browser profile at `~/Music/dj-tools/state/browser-profile/` needs wiping so `--ui` can do a clean re-login.
 - **Stage 1 (sync) cursor** — `--library` mode tracks the last `library_added_date` processed in the `cursors` table; re-runs only handle new Apple Music additions. `synced_tracks` keeps per-track outcome (`added` / `duplicate` / `fuzzy_miss` / `no_classify`) so a track is never reprocessed.
 
 ### playlist (SQL → destination)
 
 - **Stage 6a (`detect export-to-rekordbox`) and `playlist rekordbox` share the same core** — `playlist.to_rekordbox.push_to_rekordbox(rows, name)` does the writing. Stage 6a wraps it with the `rekordbox_export_at IS NULL` pending-query and an `on_added` callback to stamp the timestamp. `playlist rekordbox` calls the same function with no callback — pure ad-hoc curation, no pipeline-stamp side effects.
-- **User SQL must return `beatport_id`** — `playlist.query.run_user_query` validates the query starts with `SELECT` and contains `beatport_id`, executes it, then re-fetches full rows from `enriched_tracks_full` (so columns like artist/title/genre/key/bpm/duration come from there regardless of which table the user queried). beatport_ids missing from `enriched_tracks_full` are reported and skipped.
+- **User SQL must return `beatport_id`** — `playlist.query.run_user_query` validates the query starts with `SELECT` (the only check; the column-shape error fires after fetch if `beatport_id` isn't in the result set). After exec, `fetch_full_rows` re-fetches via `enriched_tracks LEFT JOIN enriched_tracks_analysis USING(beatport_id)` so push code always has artist/title/genre/key/bpm/length_ms regardless of how the user wrote their SQL. The query runs with the connection's full DB privileges — this tool assumes the user owns the database.
 - **DJ Studio mix file format** — `playlist dj-studio` writes to `~/Music/DJ.Studio/Database/projects-table/<uuid>` with linear `mixList` and empty `autoEffects`. The minimal field set is `{key, name, genre, duration, trackCount, minBpm, maxBpm, createdAt, lastModified, mixList, autoEffects}` — all of which DJ Studio's reader (`djstudio/extractor.py`) consumes. If DJ Studio rejects a generated mix on a future version, the missing field will surface in DJ Studio's logs; add it here.
 - **dj-studio destination requires tracks already imported** — checks `~/Music/DJ.Studio/Database/audio-library-table/*/beatport-sdk_<id>` for each beatport_id; missing ones are warned and skipped. Run `dj detect import-to-studio` first to populate the library.

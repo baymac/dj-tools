@@ -1,4 +1,11 @@
-"""Run user SQL against the enriched tables, return enriched_tracks_full rows."""
+"""Run user SQL against the enriched tables, return full row dicts.
+
+Push code (`playlist.to_rekordbox`, `playlist.to_djstudio`) needs columns the
+user's query may not have selected (artist/title/genre/key/bpm/length_ms). After
+extracting beatport_ids from the user's query, we re-fetch full rows from
+`enriched_tracks` LEFT JOIN `enriched_tracks_analysis` so destinations always
+have the fields they need regardless of how the user wrote their SQL.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -46,13 +53,25 @@ def run_user_query(sql: str) -> list[int]:
 
 
 def fetch_full_rows(beatport_ids: Sequence[int]) -> list[dict]:
-    """Re-fetch full rows from enriched_tracks_full, in the order of beatport_ids."""
+    """Re-fetch full rows for these beatport_ids, in input order.
+
+    Joins `enriched_tracks` (Beatport-derived data) LEFT JOIN
+    `enriched_tracks_analysis` (DJ Studio + rekordbox derived data) so callers
+    get every column we have on the track. Tracks not in `enriched_tracks` are
+    silently dropped from the result.
+    """
     if not beatport_ids:
         return []
     placeholders = ",".join("?" * len(beatport_ids))
     with _connect() as con:
         rows = con.execute(
-            f"SELECT * FROM enriched_tracks_full WHERE beatport_id IN ({placeholders})",
+            f"""SELECT e.*, a.mik_key AS mik_key_analysis, a.mik_nrg, a.vocals, a.drums,
+                       a.melody, a.tempo_precise, a.duration_sec, a.cue_points_count,
+                       a.analysis_json, a.rk_analysis_json,
+                       a.dj_studio_at, a.rekordbox_export_at, a.rekordbox_analysis_at
+                FROM enriched_tracks e
+                LEFT JOIN enriched_tracks_analysis a ON a.beatport_id = e.beatport_id
+                WHERE e.beatport_id IN ({placeholders})""",
             list(beatport_ids),
         ).fetchall()
     by_bid: dict[int, dict] = {int(r["beatport_id"]): dict(r) for r in rows}
