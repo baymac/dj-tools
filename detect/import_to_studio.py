@@ -206,15 +206,41 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         })
 
     beats = result.get("beatgrid", {}).get("beats", [])
+
+    # Phrase numbering: DJ Studio uses an 8-bar (32-beat) rule, anchored to the
+    # first downbeat (position == 1). Each beat gets phraseNr = (offset // 32)
+    # where offset is the beat-count from the first downbeat. (Beats before the
+    # first downbeat keep phraseNr = 0.) This matches what we observed in real
+    # DJ Studio audio-library-table entries: phraseData stays [], but beatData
+    # contains phrase indices 0..N-1 covering ~32 beats each.
+    first_downbeat_ix = next(
+        (i for i, b in enumerate(beats) if b.get("position", 1) == 1),
+        0,
+    )
+    PHRASE_BEATS = 32
+
+    # Each beat also belongs to an energyLevelSegment. Look up by time bucket.
+    def _energy_seg_for_beat(t: float) -> int:
+        for s in energy_level_segments:
+            if s["startTime"] <= t < s["endTime"]:
+                return s["nr"]
+        return 0
+
     beat_data: list[dict] = []
     for nr, b in enumerate(beats):
+        offset = max(0, nr - first_downbeat_ix)
+        phrase_nr = offset // PHRASE_BEATS
+        beat_t = b.get("time", 0)
         beat_data.append({
             "nr": nr,
-            "time": b.get("time", 0),
-            "originalTime": b.get("time", 0),
-            "type": 0 if b.get("position", 1) != 1 else -1,  # downbeat marker
-            "phraseNr": 0,
-            "energyLevelNr": 0,
+            "time": beat_t,
+            "originalTime": beat_t,
+            # Real DJ Studio beatData: type = 0 for normal beats, -1 every ~8 beats
+            # (it appears to mark mid-bar accent points, not downbeats). We mirror
+            # that by stamping -1 every 8th beat from the first downbeat.
+            "type": -1 if (offset % 8 == 0 and offset > 0) else 0,
+            "phraseNr": phrase_nr,
+            "energyLevelNr": _energy_seg_for_beat(beat_t),
         })
 
     bpm_line = []
@@ -327,11 +353,32 @@ def _write_library_entry(library_key: str, entry: dict) -> Path:
 def _write_track_structures(library_key: str, shaped: dict) -> None:
     if not shaped["beat_data"] and not shaped["energy_level_segments"]:
         return
+    # Build phraseData from the per-beat phraseNr we already computed.
+    # Each phrase entry: {nr, startBeatNr, beatLength}.
+    phrase_data: list[dict] = []
+    if shaped["beat_data"]:
+        cur = shaped["beat_data"][0]["phraseNr"]
+        start_nr = 0
+        for i, bd in enumerate(shaped["beat_data"]):
+            if bd["phraseNr"] != cur:
+                phrase_data.append({
+                    "nr": cur,
+                    "startBeatNr": start_nr,
+                    "beatLength": i - start_nr,
+                })
+                cur = bd["phraseNr"]
+                start_nr = i
+        phrase_data.append({
+            "nr": cur,
+            "startBeatNr": start_nr,
+            "beatLength": len(shaped["beat_data"]) - start_nr,
+        })
+
     entry = {
         "key": library_key,
         "beatData": shaped["beat_data"],
         "bpmLine": shaped["bpm_line"],
-        "phraseData": [],
+        "phraseData": phrase_data,
         "energyLevelData": shaped["energy_level_segments"],
     }
     out_path = _existing_entry_path(library_key, DJ_STUDIO_STRUCTURES)

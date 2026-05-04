@@ -234,23 +234,13 @@ async function runBeatgrid(monoSamples) {
   };
 }
 
-async function runPhraseDetect(monoSamples, beatTimes) {
-  const addon = getBeatgridAddon();
-  if (typeof addon.processPhrasesAsync !== 'function') return null;
-  // The activity signal is the same audio quantised to bytes (DJ Studio's worker
-  // does Math.round on Float32 → Uint8 → back to Float32). We mirror that.
-  const activity = new Float32Array(monoSamples.length);
-  for (let i = 0; i < monoSamples.length; i++) activity[i] = Math.round(monoSamples[i] * 127);
-  const beatTimesF = new Float32Array(beatTimes);
-  try {
-    const res = await addon.processPhrasesAsync(activity, beatTimesF, BEATGRID_MODEL_PHRASES, PHRASE_REMOTE_URL);
-    if (res && Array.isArray(res.labels)) res.labels = res.labels.filter(l => l !== '');
-    return res;
-  } catch (e) {
-    logMsg(`phrase detect failed: ${e.message}`);
-    return null;
-  }
-}
+// ML phrase detection (ai-beatgrid model_phrases.pt) is dormant in DJ Studio's
+// current renderer (BeatgridChannelClient doesn't expose processPhrases) and
+// the remote-fallback URL is dead (404). Real DJ Studio audio-library-table
+// entries also have phraseData=[] but populate beatData[].phraseNr using a
+// deterministic 8-bar rule. We do the same in Python (see _shape_result) and
+// skip the ML call entirely here.
+async function runPhraseDetect(_monoSamples, _beatTimes) { return null; }
 
 // ── 5. ai-stems (Demucs Fast: vocals + bass + drums + other) ──────────────────
 
