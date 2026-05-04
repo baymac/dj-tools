@@ -46,7 +46,9 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from connections import beatport as bp_api
 from detect import db as detect_db
+from detect.enrich import _get_token as _get_beatport_token
 
 console = Console()
 
@@ -150,7 +152,7 @@ def _camelot_to_int(camelot: object) -> Optional[int]:
 
 
 def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
-    """Pull DJ-Studio-shaped fields out of the Node helper output."""
+    """Pull DJ-Studio-shaped fields + rich analysis fields out of the Node helper output."""
     server = result.get("server") or {}
     if not server.get("ok"):
         return None
@@ -158,7 +160,10 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
     if not body.get("IsLicenseValid"):
         return None
 
-    main_key = (body.get("KeySummary") or {}).get("MainKey")
+    key_summary = body.get("KeySummary") or {}
+    main_key = key_summary.get("MainKey")
+    second_key = key_summary.get("SecondKey")
+    main_confidence = key_summary.get("MainKeyConfidence")
     mik_key_int = _camelot_to_int(main_key)
     if mik_key_int is None:
         return None
@@ -259,6 +264,85 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         "maxBpm": int(round(bpm)) if bpm else 0,
     }]
 
+    # Phrase count: max phraseNr + 1 (or 0 if no beats)
+    phrase_count = max((b["phraseNr"] for b in beat_data), default=-1) + 1
+    cue_points_count = len(cue_points)
+
+    # Stem metrics passed through from the Node helper.
+    stem_metrics = result.get("stem_metrics") or {}
+    def _sm(stem: str, field: str) -> Optional[float]:
+        return (stem_metrics.get(stem) or {}).get(field)
+
+    rich = {
+        "mik_key_secondary": str(second_key) if second_key else None,
+        "mik_key_confidence": (
+            float(main_confidence) if main_confidence is not None else None
+        ),
+        "tempo_precise": float(bpm) if bpm else None,
+        "duration_sec": duration_sec or None,
+        "phrase_count": phrase_count,
+        "cue_points_count": cue_points_count,
+        "vocals_avg":  _sm("vocals", "avg_rms"),
+        "drums_avg":   _sm("drums",  "avg_rms"),
+        "bass_avg":    _sm("bass",   "avg_rms"),
+        "melody_avg":  _sm("other",  "avg_rms"),    # Demucs "other" → melody
+        "vocals_peak": _sm("vocals", "peak_rms"),
+        "drums_peak":  _sm("drums",  "peak_rms"),
+        "bass_peak":   _sm("bass",   "peak_rms"),
+        "melody_peak": _sm("other",  "peak_rms"),
+    }
+
+    # Compact analysis blob for LLM consumption (full energy/cue/phrase/beat detail).
+    analysis = {
+        "version": 1,
+        "key": {
+            "main": main_key,
+            "main_int": mik_key_int,
+            "main_confidence": main_confidence,
+            "second": second_key,
+            "second_confidence": key_summary.get("SecondKeyConfidence"),
+            "is_single_note": key_summary.get("MainKeyIsSingleNote"),
+        },
+        "energy": {
+            "overall": mik_nrg_int,
+            "segments": [
+                {
+                    "start_beat": s["startBeatNr"],
+                    "beat_length": s["beatLength"],
+                    "start_sec": s["startTime"],
+                    "end_sec": s["endTime"],
+                    "energy": s["mikEnergy"],
+                    "label": s["label"],
+                    "volume_rms_db": s["mikVolume"],
+                }
+                for s in energy_level_segments
+            ],
+        },
+        "cue_points": [
+            {"beat": cp["beat"], "time_sec": cp["time"], "type": cp["type"]}
+            for cp in cue_points
+        ],
+        "tempo": {
+            "bpm": bpm,
+            "wasm_tempo": result.get("wasm", {}).get("tempo"),
+            "downbeat_time_sec": result.get("wasm", {}).get("downbeat_time"),
+            "cue_point_start_beat": result.get("wasm", {}).get("cue_point_start_beat"),
+        },
+        "structure": {
+            "beats": len(beats),
+            "phrases": phrase_count,
+            "bars_per_phrase": 8,
+            "first_downbeat_beat_ix": first_downbeat_ix,
+        },
+        "stems": {
+            stem: {
+                "avg_rms": _sm(stem, "avg_rms"),
+                "peak_rms": _sm(stem, "peak_rms"),
+            }
+            for stem in ("vocals", "drums", "bass", "other")
+        },
+    }
+
     return {
         "bpm": bpm,
         "duration_sec": duration_sec,
@@ -270,6 +354,8 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
         "bpm_line": bpm_line,
         "beat_grids": beat_grids,
         "stems_compressed_b64": result.get("stems_compressed_b64") or {},
+        "rich": rich,
+        "analysis_json": json.dumps(analysis, separators=(",", ":")),
     }
 
 
@@ -520,6 +606,11 @@ def run_import_to_studio(
         )
         return
 
+    # Beatport client — used for per-track catalog metadata (label, ISRC, mix_name, etc.)
+    bp_token = _get_beatport_token()
+    bp_http = bp_api.make_client(bp_token)
+    beatport = bp_api.Beatport(client=bp_http)
+
     counts = {"seen": 0, "ok": 0, "fail": 0}
 
     progress = Progress(
@@ -564,19 +655,47 @@ def run_import_to_studio(
             # DJ Studio's "melody" stem is what Demucs calls "other".
             _write_compressed_view(DJ_STUDIO_MELODY, library_key, stems_b64.get("other"))
 
+            # Pull extra Beatport catalog metadata for the rich row.
+            bp_meta = {}
+            try:
+                track = beatport.get_track(bid)
+                if track:
+                    label_obj = (track.get("release") or {}).get("label") or {}
+                    sub_genre = track.get("sub_genre") or {}
+                    bp_meta = {
+                        "mix_name": track.get("mix_name"),
+                        "label": label_obj.get("name") if isinstance(label_obj, dict) else None,
+                        "catalog_number": track.get("catalog_number"),
+                        "isrc": track.get("isrc"),
+                        "sub_genre": sub_genre.get("name") if isinstance(sub_genre, dict) else None,
+                        "length_ms": track.get("length_ms"),
+                    }
+            except Exception:
+                pass
+
+            # Write rich fields to enriched_tracks_test (or the chosen table).
+            rich = dict(shaped["rich"])
+            rich.update({k: v for k, v in bp_meta.items() if v is not None})
+            rich["analysis_json"] = shaped["analysis_json"]
+            if table == "enriched_tracks_test":
+                detect_db.update_enriched_tracks_test_rich(bid, rich)
+
             counts["ok"] += 1
             if verbose:
                 t = res["result"].get("timing_ms", {})
                 progress.log(
                     f"[green]bp:{bid}[/green] "
-                    f"key={MIK_CAMELOT_INT_TO_STR.get(shaped['mik_key_int'])}  "
+                    f"key={MIK_CAMELOT_INT_TO_STR.get(shaped['mik_key_int'])}/"
+                    f"{shaped['rich'].get('mik_key_secondary') or '-'}  "
+                    f"conf={shaped['rich'].get('mik_key_confidence') or 0:.2f}  "
                     f"nrg={shaped['mik_nrg_int']}  "
-                    f"bpm={shaped['bpm']:.1f}  "
-                    f"({t.get('total', 0)/1000:.1f}s: fetch={t.get('fetch',0)/1000:.1f}, "
-                    f"mik={t.get('mik',0)/1000:.1f}, srv={t.get('server',0)/1000:.1f}, "
-                    f"bg={t.get('beatgrid',0)/1000:.1f}, st={t.get('stems',0)/1000:.1f})"
+                    f"bpm={shaped['bpm']:.2f}  "
+                    f"phr={shaped['rich'].get('phrase_count')}  "
+                    f"cue={shaped['rich'].get('cue_points_count')}  "
+                    f"({t.get('total', 0)/1000:.1f}s)"
                 )
 
+    bp_http.close()
     console.print()
     console.print(f"[bold]Done.[/bold] {counts['ok']}/{counts['seen']} written  ({counts['fail']} failed)")
     if counts["ok"]:

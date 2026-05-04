@@ -600,33 +600,59 @@ def update_studio_enrich(enriched_id: int, data: dict, table: str = "enriched_tr
 
 
 def create_enriched_tracks_test(limit: int = 100) -> int:
-    """Drop and recreate enriched_tracks_test with `limit` most-recently-enriched rows."""
+    """Drop and recreate enriched_tracks_test with `limit` most-recently-enriched rows.
+
+    Schema includes the original enriched_tracks columns plus the rich analysis
+    fields populated by `dj detect import-to-studio` (Path A SDK pipeline).
+    """
     with _connect() as con:
         con.execute("DROP TABLE IF EXISTS enriched_tracks_test")
         con.execute("""
             CREATE TABLE enriched_tracks_test (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                detected_track_id INTEGER,
-                beatport_id       INTEGER NOT NULL,
-                beatport_link     TEXT,
-                bpm               REAL,
-                key               TEXT,
-                genre             TEXT,
-                release_date      TEXT,
-                apple_music_url   TEXT,
-                artist            TEXT,
-                title             TEXT,
-                mik_key           TEXT,
-                mik_nrg           REAL,
-                vocals            TEXT,
-                drums             TEXT,
-                melody            TEXT,
-                enriched_at       TEXT NOT NULL
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                detected_track_id   INTEGER,
+                beatport_id         INTEGER NOT NULL,
+                beatport_link       TEXT,
+                bpm                 REAL,
+                key                 TEXT,
+                genre               TEXT,
+                release_date        TEXT,
+                apple_music_url     TEXT,
+                artist              TEXT,
+                title               TEXT,
+                mik_key             TEXT,
+                mik_nrg             REAL,
+                vocals              TEXT,
+                drums               TEXT,
+                melody              TEXT,
+                enriched_at         TEXT NOT NULL,
+                -- Rich analysis (populated by import-to-studio):
+                mik_key_secondary   TEXT,    -- e.g. '8A' (compatible Camelot for transitions)
+                mik_key_confidence  REAL,    -- 0..1 from cf.dj.studio classifier
+                tempo_precise       REAL,    -- ai-beatgrid BPM (more precise than Beatport's int)
+                duration_sec        REAL,    -- full track duration
+                phrase_count        INTEGER, -- number of 8-bar phrases
+                cue_points_count    INTEGER, -- detected cue points (drops/breaks)
+                vocals_avg          REAL,    -- 0..1 RMS over full track
+                drums_avg           REAL,
+                bass_avg            REAL,
+                melody_avg          REAL,
+                vocals_peak         REAL,    -- peak RMS bucket (highest 23ms)
+                drums_peak          REAL,
+                bass_peak           REAL,
+                melody_peak         REAL,
+                -- Beatport catalog (extra fields beyond the basic enrich):
+                mix_name            TEXT,    -- 'Original Mix', 'Extended Mix', remixer name
+                label               TEXT,
+                catalog_number      TEXT,
+                isrc                TEXT,
+                sub_genre           TEXT,
+                length_ms           INTEGER,
+                -- Full analysis blob for LLM ingest:
+                analysis_json       TEXT     -- {energy_segments, cue_points, phrase_summary, ...}
             )
         """)
-        con.execute(
-            "CREATE INDEX idx_ett_beatport_id ON enriched_tracks_test(beatport_id)"
-        )
+        con.execute("CREATE INDEX idx_ett_beatport_id ON enriched_tracks_test(beatport_id)")
         con.execute(
             """
             INSERT INTO enriched_tracks_test
@@ -644,3 +670,27 @@ def create_enriched_tracks_test(limit: int = 100) -> int:
             (limit,),
         )
         return con.execute("SELECT COUNT(*) FROM enriched_tracks_test").fetchone()[0]
+
+
+def update_enriched_tracks_test_rich(beatport_id: int, fields: dict) -> None:
+    """Update the rich-analysis columns for one row in enriched_tracks_test.
+
+    Only writes columns that exist; silently ignores unknown keys.
+    """
+    allowed = {
+        "mik_key_secondary", "mik_key_confidence", "tempo_precise", "duration_sec",
+        "phrase_count", "cue_points_count",
+        "vocals_avg", "drums_avg", "bass_avg", "melody_avg",
+        "vocals_peak", "drums_peak", "bass_peak", "melody_peak",
+        "mix_name", "label", "catalog_number", "isrc", "sub_genre", "length_ms",
+        "analysis_json",
+    }
+    cols = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not cols:
+        return
+    setters = ", ".join(f"{k} = ?" for k in cols)
+    with _connect() as con:
+        con.execute(
+            f"UPDATE enriched_tracks_test SET {setters} WHERE beatport_id = ?",
+            (*cols.values(), beatport_id),
+        )

@@ -286,12 +286,16 @@ async function runStems(monoSamples) {
 //   2-byte header + N records of 8 bytes each
 //   Each record: bytes[0..5] = 0, bytes[6..7] = uint16_LE(amplitude)
 // Bucket size: 1024 samples (~23ms at 44.1k) — matches DJ Studio's record density.
+// Returns { compressed_b64, avg_rms, peak_rms } so the caller can store summary
+// metrics without re-decoding the binary.
 const BUCKET_SAMPLES = 1024;
 function compressStemToView(stemSamples) {
-  if (!stemSamples) return null;
+  if (!stemSamples) return { compressed_b64: null, avg_rms: null, peak_rms: null };
   const n = Math.floor(stemSamples.length / BUCKET_SAMPLES);
   const out = Buffer.alloc(2 + n * 8);
   out.writeUInt16LE(0xFFFF, 0);
+  let sumRms = 0;
+  let peakRms = 0;
   for (let i = 0; i < n; i++) {
     let sumSq = 0;
     const base = i * BUCKET_SAMPLES;
@@ -300,12 +304,18 @@ function compressStemToView(stemSamples) {
       sumSq += s * s;
     }
     const rms = Math.sqrt(sumSq / BUCKET_SAMPLES);
+    sumRms += rms;
+    if (rms > peakRms) peakRms = rms;
     let amp = Math.round(rms * 65535);
     if (amp < 0) amp = 0;
     if (amp > 65535) amp = 65535;
     out.writeUInt16LE(amp, 2 + i * 8 + 6);
   }
-  return out.toString('base64');
+  return {
+    compressed_b64: out.toString('base64'),
+    avg_rms: n ? sumRms / n : 0,
+    peak_rms: peakRms,
+  };
 }
 
 // ── Per-track orchestration ───────────────────────────────────────────────────
@@ -345,12 +355,18 @@ async function analyzeTrack(beatportId, accessJwt) {
   const stems = await runStems(mono);
   const tSt = Date.now() - tStStart;
 
-  // 6. compressed views
+  // 6. compressed views + per-stem RMS metrics
   const compressed = {
     vocals: compressStemToView(stems.stems.vocals),
     drums:  compressStemToView(stems.stems.drums),
     bass:   compressStemToView(stems.stems.bass),
     other:  compressStemToView(stems.stems.other),
+  };
+  const stem_metrics = {
+    vocals: { avg_rms: compressed.vocals.avg_rms, peak_rms: compressed.vocals.peak_rms },
+    drums:  { avg_rms: compressed.drums.avg_rms,  peak_rms: compressed.drums.peak_rms },
+    bass:   { avg_rms: compressed.bass.avg_rms,   peak_rms: compressed.bass.peak_rms },
+    other:  { avg_rms: compressed.other.avg_rms,  peak_rms: compressed.other.peak_rms },
   };
 
   return {
@@ -372,7 +388,13 @@ async function analyzeTrack(beatportId, accessJwt) {
       beats_aligned: beatgrid.beats_aligned,
     },
     phrases: phrases || null,
-    stems_compressed_b64: compressed,
+    stems_compressed_b64: {
+      vocals: compressed.vocals.compressed_b64,
+      drums:  compressed.drums.compressed_b64,
+      bass:   compressed.bass.compressed_b64,
+      other:  compressed.other.compressed_b64,
+    },
+    stem_metrics,
     stems_process_time_ms: stems.process_time_ms,
   };
 }
