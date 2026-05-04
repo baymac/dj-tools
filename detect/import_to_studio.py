@@ -46,9 +46,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-from connections import beatport as bp_api
 from detect import db as detect_db
-from detect.enrich import _get_token as _get_beatport_token, _try_refresh as _try_refresh_beatport
 
 console = Console()
 
@@ -585,12 +583,20 @@ class SdkHelper:
 
 def run_import_to_studio(
     *,
-    table: str = "enriched_tracks_test",
     limit: int = 0,
-    keep_temp: bool = False,  # unused now (no temp dir), kept for CLI compat
     verbose: bool = False,
     force: bool = False,
 ) -> None:
+    from paths import command_logger
+    with command_logger("import-to-studio", console) as log_path:
+        console.print(f"[dim]Log: {log_path}[/dim]")
+        _run_import_to_studio_impl(limit=limit, verbose=verbose, force=force)
+
+
+def _run_import_to_studio_impl(
+    *, limit: int, verbose: bool, force: bool,
+) -> None:
+    table = "enriched_tracks_full"
     if is_dj_studio_running():
         console.print(
             "[red]DJ Studio is currently running.[/red]\n"
@@ -601,7 +607,7 @@ def run_import_to_studio(
 
     console.print(f"[bold]import-to-studio[/bold] ← [cyan]{table}[/cyan]  (Path A: full tracks via DJ Studio SDK)")
 
-    rows = detect_db.get_import_to_studio_pending(table=table, force=force)
+    rows = detect_db.get_import_to_studio_pending(force=force)
     if limit:
         rows = rows[:limit]
     if not rows:
@@ -620,31 +626,6 @@ def run_import_to_studio(
             "[yellow]Open DJ Studio briefly to refresh its session, then quit and re-run.[/yellow]"
         )
         return
-
-    # Beatport client — used for per-track catalog metadata (label, ISRC, mix_name, etc.)
-    # Beatport access tokens last ~10 minutes. A 100-track run takes ~40 minutes,
-    # so the token will expire mid-run. on_401 refreshes via the session cookie
-    # and updates the live client's Authorization header — no expiry interruptions.
-    bp_token = _get_beatport_token()
-    bp_http = bp_api.make_client(bp_token)
-
-    def _bp_on_401() -> None:
-        nonlocal bp_token
-        new_token = _try_refresh_beatport()
-        if new_token:
-            bp_token = new_token
-            bp_http.headers["authorization"] = bp_token
-            bp_api.save_token_to_env(bp_token)
-            console.log("[dim]Beatport token refreshed mid-run.[/dim]")
-        else:
-            # Don't raise — Beatport metadata is non-critical (each get_track call
-            # is wrapped in try/except). Log and continue without refresh.
-            console.log("[yellow]Beatport session refresh failed; metadata for "
-                        "remaining tracks may be missing. Run "
-                        "[cyan]dj login-beatport --ui[/cyan] then re-run with "
-                        "[cyan]--force[/cyan] to backfill.[/yellow]")
-
-    beatport = bp_api.Beatport(client=bp_http, on_401=_bp_on_401)
 
     counts = {"seen": 0, "ok": 0, "fail": 0, "retried": 0}
     failed_rows: list[dict] = []  # (row, last_error) for end-of-run retry pass
@@ -682,30 +663,13 @@ def run_import_to_studio(
         _write_compressed_view(DJ_STUDIO_BASS,   library_key, stems_b64.get("bass"))
         _write_compressed_view(DJ_STUDIO_MELODY, library_key, stems_b64.get("other"))
 
-        bp_meta = {}
-        try:
-            track = beatport.get_track(bid)
-            if track:
-                label_obj = (track.get("release") or {}).get("label") or {}
-                sub_genre = track.get("sub_genre") or {}
-                bp_meta = {
-                    "mix_name": track.get("mix_name"),
-                    "label": label_obj.get("name") if isinstance(label_obj, dict) else None,
-                    "catalog_number": track.get("catalog_number"),
-                    "isrc": track.get("isrc"),
-                    "sub_genre": sub_genre.get("name") if isinstance(sub_genre, dict) else None,
-                    "length_ms": track.get("length_ms"),
-                }
-        except Exception:
-            pass
-
+        # Beatport catalog metadata (label/ISRC/etc.) is now fetched up-front
+        # by `dj detect enrich` and persisted on enriched_tracks_full. We only
+        # write the analysis-derived rich fields here.
         rich = dict(shaped["rich"])
-        rich.update({k: v for k, v in bp_meta.items() if v is not None})
         rich["analysis_json"] = shaped["analysis_json"]
-        # Write rich fields to whichever table is being driven (production or
-        # the test sandbox). Then stamp dj_studio_at so re-runs skip this row.
-        detect_db.update_enriched_rich(bid, rich, table=table)
-        detect_db.mark_pipeline_done(table, bid, "dj_studio_at")
+        detect_db.update_enriched_rich(bid, rich)
+        detect_db.mark_pipeline_done(bid, "dj_studio_at")
 
         if verbose:
             t = res["result"].get("timing_ms", {})
@@ -761,7 +725,6 @@ def run_import_to_studio(
                         progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {err[:160]}")
             failed_rows = still_failed
 
-    bp_http.close()
     console.print()
     summary = f"{counts['ok']}/{counts['seen']} written"
     if counts["retried"]:

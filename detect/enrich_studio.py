@@ -87,7 +87,15 @@ def _read_stems(library_key: str) -> dict:
     return result
 
 
-def run_enrich_studio(dry_run: bool, limit: int, verbose: bool, table: str = "enriched_tracks") -> None:
+def run_enrich_studio(dry_run: bool, limit: int, verbose: bool) -> None:
+    from paths import command_logger
+    with command_logger("enrich-studio", console) as log_path:
+        console.print(f"[dim]Log: {log_path}[/dim]")
+        _run_enrich_studio_impl(dry_run, limit, verbose)
+
+
+def _run_enrich_studio_impl(dry_run: bool, limit: int, verbose: bool) -> None:
+    table = "enriched_tracks_full"
     if dry_run:
         console.print("[yellow]DRY RUN[/yellow] — no changes will be made")
 
@@ -102,7 +110,7 @@ def run_enrich_studio(dry_run: bool, limit: int, verbose: bool, table: str = "en
 
     console.print(f"[dim]{len(library)} tracks in DJ Studio library[/dim]")
 
-    tracks = detect_db.get_studio_enrichable_tracks(table=table)
+    tracks = detect_db.get_studio_enrichable_tracks()
     if limit:
         tracks = tracks[:limit]
 
@@ -176,7 +184,7 @@ def run_enrich_studio(dry_run: bool, limit: int, verbose: bool, table: str = "en
                 counts["updated"] += 1
                 continue
 
-            detect_db.update_studio_enrich(enriched_id, data, table=table)
+            detect_db.update_studio_enrich(enriched_id, data)
             counts["updated"] += 1
             if verbose:
                 progress.log(

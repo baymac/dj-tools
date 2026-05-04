@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 
-DB_PATH = Path.home() / "Music" / "DJ.Studio" / "dj.db"
+from paths import DB_PATH
 
 
 def _connect() -> sqlite3.Connection:
@@ -133,47 +132,64 @@ def migrate() -> None:
         except Exception:
             pass
 
-        # ── Additive migrations: rich-analysis columns on enriched_tracks ────
-        # These columns are populated by `dj detect import-to-studio` (Path A
-        # SDK pipeline). Adding them on existing DBs is a no-op when columns
-        # already exist. Each is one-source per column so future pipelines
-        # (e.g. rekordbox PSSI import) can populate their own without
-        # conflict — extensibility by addition.
-        _ENRICHED_RICH_COLS = [
-            ("mik_key_secondary",   "TEXT"),
-            ("mik_key_confidence",  "REAL"),
-            ("tempo_precise",       "REAL"),
-            ("duration_sec",        "REAL"),
-            ("cue_points_count",    "INTEGER"),
-            ("vocals_avg",          "REAL"),
-            ("drums_avg",           "REAL"),
-            ("bass_avg",            "REAL"),
-            ("melody_avg",          "REAL"),
-            ("vocals_peak",         "REAL"),
-            ("drums_peak",          "REAL"),
-            ("bass_peak",           "REAL"),
-            ("melody_peak",         "REAL"),
-            ("mix_name",            "TEXT"),
-            ("label",               "TEXT"),
-            ("catalog_number",      "TEXT"),
-            ("isrc",                "TEXT"),
-            ("sub_genre",           "TEXT"),
-            ("length_ms",           "INTEGER"),
-            ("analysis_json",       "TEXT"),
-            # Rekordbox enrichment (added by import-rekordbox-analysis):
-            ("rk_analysis_json",      "TEXT"),  # phrases (PSSI) + memory cues + hot cues + mood
-            # Per-source completion timestamps. NULL = not done; ISO8601 = done.
-            # Lets each pipeline own a single column for skip/re-run logic.
-            ("dj_studio_at",          "TEXT"),  # import-to-studio finished (DJ Studio analysis)
-            ("rekordbox_export_at",   "TEXT"),  # export-to-rekordbox pushed track + playlist entry
-            ("rekordbox_analysis_at", "TEXT"),  # import-rekordbox-analysis ingested ANLZ data
-        ]
-        for col, typ in _ENRICHED_RICH_COLS:
-            _add_column_if_missing(con, "enriched_tracks", col, typ)
-            # Mirror to enriched_tracks_test if it exists. Created via
-            # CREATE TABLE AS, so it inherits whatever columns enriched_tracks
-            # had at seed time — but later migrations need to be re-applied.
-            _add_column_if_missing(con, "enriched_tracks_test", col, typ)
+        # ── enriched_tracks_full: canonical rich-enrichment table ─────────────
+        # All commands beyond `dj detect enrich` operate on this table.
+        # `enriched_tracks` (legacy, lean) holds only the basic-enrich fields
+        # populated by the Beatport search-match step in `dj detect enrich`.
+        # Full BP metadata + DJ Studio analysis + rekordbox analysis all land
+        # in enriched_tracks_full.
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS enriched_tracks_full (
+                -- Identity (mirrors enriched_tracks)
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                detected_track_id   INTEGER,
+                beatport_id         INTEGER NOT NULL,
+                beatport_link       TEXT,
+                bpm                 REAL,
+                key                 TEXT,
+                genre               TEXT,
+                release_date        TEXT,
+                apple_music_url     TEXT,
+                artist              TEXT,
+                title               TEXT,
+                enriched_at         TEXT NOT NULL,
+                -- Beatport API extras (fetched by `dj detect enrich`)
+                mix_name            TEXT,
+                label               TEXT,
+                catalog_number      TEXT,
+                isrc                TEXT,
+                sub_genre           TEXT,
+                length_ms           INTEGER,
+                -- DJ Studio analysis (populated by `dj detect import-to-studio`)
+                mik_key             TEXT,
+                mik_nrg             REAL,
+                vocals              TEXT,
+                drums               TEXT,
+                melody              TEXT,
+                mik_key_secondary   TEXT,
+                mik_key_confidence  REAL,
+                tempo_precise       REAL,
+                duration_sec        REAL,
+                cue_points_count    INTEGER,
+                vocals_avg          REAL,
+                drums_avg           REAL,
+                bass_avg            REAL,
+                melody_avg          REAL,
+                vocals_peak         REAL,
+                drums_peak          REAL,
+                bass_peak           REAL,
+                melody_peak         REAL,
+                analysis_json       TEXT,
+                -- Rekordbox analysis (populated by `dj detect import-rekordbox-analysis`)
+                rk_analysis_json    TEXT,
+                -- Per-source completion timestamps (skip rules + idempotence)
+                dj_studio_at          TEXT,
+                rekordbox_export_at   TEXT,
+                rekordbox_analysis_at TEXT,
+                UNIQUE(beatport_id)
+            )
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_etf_beatport_id ON enriched_tracks_full(beatport_id)")
 
 
 def _add_column_if_missing(con: sqlite3.Connection, table: str, col: str, typ: str) -> None:
@@ -546,14 +562,6 @@ def list_enrich_runs(limit: int = 20) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def get_synced_beatport_ids() -> set[int]:
-    with _connect() as con:
-        rows = con.execute(
-            "SELECT beatport_id FROM enriched_tracks WHERE beatport_id IS NOT NULL"
-        ).fetchall()
-        return {r[0] for r in rows}
-
-
 def upsert_beatport_playlist(beatport_id: int, name: str) -> int:
     """Upsert a Beatport playlist record. Returns the local row id."""
     with _connect() as con:
@@ -620,126 +628,125 @@ def insert_beatport_track(
                 )
                 newly_linked = True
 
-        return newly_inserted or newly_linked
+        result = newly_inserted or newly_linked
+
+    # Mirror to enriched_tracks_full so import-to-studio / export-to-rekordbox
+    # / etc. pick this track up too. Done OUTSIDE the outer `with _connect()`
+    # so the inner connection doesn't deadlock on the open write txn.
+    # Beatport-playlist sync doesn't fetch the catalog detail, so extras stays
+    # empty here — full-detail fetch lives in `dj detect enrich`.
+    try:
+        upsert_full_from_enrich(
+            detected_track_id=None,
+            beatport_id=beatport_id,
+            basic={
+                "beatport_link": beatport_link,
+                "bpm": meta.get("bpm"),
+                "key": meta.get("key"),
+                "genre": meta.get("genre"),
+                "release_date": meta.get("release_date"),
+                "artist": artist,
+                "title": title,
+            },
+            extras={},
+        )
+    except Exception:
+        pass
+
+    return result
 
 
-_STUDIO_TABLES = frozenset({"enriched_tracks", "enriched_tracks_test"})
+FULL_TABLE = "enriched_tracks_full"
 
 
-def get_studio_enrichable_tracks(table: str = "enriched_tracks") -> list[sqlite3.Row]:
+def get_studio_enrichable_tracks() -> list[sqlite3.Row]:
     """Tracks for `dj detect enrich-studio` to read DJ Studio's library.
 
-    Skip rule: tracks that already have mik_key set (existing semantics).
+    Skip rule: mik_key IS NULL on enriched_tracks_full.
     For the heavier `dj detect import-to-studio` pipeline, see
     `get_import_to_studio_pending` which uses a stronger skip rule.
     """
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
     with _connect() as con:
         return con.execute(
             f"""SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm
-                FROM {table} e
+                FROM {FULL_TABLE} e
                 WHERE e.mik_key IS NULL
                 ORDER BY e.id""",
         ).fetchall()
 
 
-def get_import_to_studio_pending(table: str = "enriched_tracks", *, force: bool = False) -> list[sqlite3.Row]:
+def get_import_to_studio_pending(*, force: bool = False) -> list[sqlite3.Row]:
     """Tracks pending Path A analysis (dj detect import-to-studio).
 
     Skip rule: `dj_studio_at IS NULL`. Pipeline sets that timestamp on
-    successful run, so re-running the command picks up only new + previously-
-    failed rows. Pass force=True to re-process every track.
+    successful run. Pass force=True to re-process every track.
     """
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
     with _connect() as con:
-        # Defensive: ensure dj_studio_at exists on this table (the migration
-        # may not have run for enriched_tracks_test which is recreated fresh).
-        _add_column_if_missing(con, table, "dj_studio_at", "TEXT")
         where = "" if force else "WHERE e.dj_studio_at IS NULL"
         return con.execute(
             f"""SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm
-                FROM {table} e
+                FROM {FULL_TABLE} e
                 {where}
                 ORDER BY e.id""",
         ).fetchall()
 
 
-def mark_pipeline_done(table: str, beatport_id: int, column: str) -> None:
-    """Stamp a per-source completion column with the current ISO timestamp."""
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
+def mark_pipeline_done(beatport_id: int, column: str) -> None:
+    """Stamp a per-source completion column on enriched_tracks_full with the
+    current ISO timestamp."""
     if column not in {"dj_studio_at", "rekordbox_export_at", "rekordbox_analysis_at"}:
         raise ValueError(f"Unsupported column: {column}")
     with _connect() as con:
-        _add_column_if_missing(con, table, column, "TEXT")
         con.execute(
-            f"UPDATE {table} SET {column} = ? WHERE beatport_id = ?",
+            f"UPDATE {FULL_TABLE} SET {column} = ? WHERE beatport_id = ?",
             (_now(), beatport_id),
         )
 
 
-def get_export_to_rekordbox_pending(table: str = "enriched_tracks", *, force: bool = False) -> list[sqlite3.Row]:
-    """Tracks not yet pushed into a rekordbox playlist.
-
+def get_export_to_rekordbox_pending(*, force: bool = False) -> list[sqlite3.Row]:
+    """Tracks in enriched_tracks_full not yet pushed to a rekordbox playlist.
     Skip rule: rekordbox_export_at IS NULL.
     """
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
     with _connect() as con:
-        _add_column_if_missing(con, table, "rekordbox_export_at", "TEXT")
         where = "" if force else "WHERE e.rekordbox_export_at IS NULL"
         return con.execute(
             f"""SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm,
                        e.beatport_link, e.key, e.genre, e.duration_sec, e.mik_key
-                  FROM {table} e
+                  FROM {FULL_TABLE} e
                   {where}
                   ORDER BY e.id""",
         ).fetchall()
 
 
-def get_rekordbox_analysis_pending(table: str = "enriched_tracks", *, force: bool = False) -> list[sqlite3.Row]:
-    """Tracks pushed to rekordbox but not yet ingested back from ANLZ.
-
-    Skip rule: rekordbox_export_at IS NOT NULL  AND  rekordbox_analysis_at IS NULL.
-    Won't try to ingest tracks that haven't been pushed yet.
-    """
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
+def get_rekordbox_analysis_pending(*, force: bool = False) -> list[sqlite3.Row]:
+    """Tracks pushed to rekordbox but not yet ingested back from ANLZ."""
+    where = (
+        "WHERE e.rekordbox_export_at IS NOT NULL"
+        if force
+        else "WHERE e.rekordbox_export_at IS NOT NULL AND e.rekordbox_analysis_at IS NULL"
+    )
     with _connect() as con:
-        _add_column_if_missing(con, table, "rekordbox_export_at", "TEXT")
-        _add_column_if_missing(con, table, "rekordbox_analysis_at", "TEXT")
-        where = (
-            "WHERE e.rekordbox_export_at IS NOT NULL"
-            if force
-            else "WHERE e.rekordbox_export_at IS NOT NULL AND e.rekordbox_analysis_at IS NULL"
-        )
         return con.execute(
             f"""SELECT e.id, e.beatport_id, e.artist, e.title
-                  FROM {table} e
+                  FROM {FULL_TABLE} e
                   {where}
                   ORDER BY e.id""",
         ).fetchall()
 
 
-def update_rk_analysis_json(table: str, beatport_id: int, blob: str) -> None:
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
+def update_rk_analysis_json(beatport_id: int, blob: str) -> None:
     with _connect() as con:
-        _add_column_if_missing(con, table, "rk_analysis_json", "TEXT")
         con.execute(
-            f"UPDATE {table} SET rk_analysis_json = ? WHERE beatport_id = ?",
+            f"UPDATE {FULL_TABLE} SET rk_analysis_json = ? WHERE beatport_id = ?",
             (blob, beatport_id),
         )
 
 
-def update_studio_enrich(enriched_id: int, data: dict, table: str = "enriched_tracks") -> None:
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
+def update_studio_enrich(enriched_id: int, data: dict) -> None:
+    """Write mik_key/mik_nrg/vocals/drums/melody to enriched_tracks_full."""
     with _connect() as con:
         con.execute(
-            f"""UPDATE {table}
+            f"""UPDATE {FULL_TABLE}
                SET mik_key=?, mik_nrg=?, vocals=?, drums=?, melody=?
                WHERE id=?""",
             (data.get("mik_key"), data.get("mik_nrg"), data.get("vocals"),
@@ -747,46 +754,8 @@ def update_studio_enrich(enriched_id: int, data: dict, table: str = "enriched_tr
         )
 
 
-def create_enriched_tracks_test(limit: int = 100) -> int:
-    """Drop and recreate enriched_tracks_test with `limit` most-recently-enriched rows.
-
-    Schema mirrors enriched_tracks 1:1 (every column copies through), so:
-      - rich-analysis fields already populated on production rows carry over
-        and are NOT re-processed when `import-to-studio` runs against the test
-        table (idempotence in re-runs).
-      - completion timestamps (dj_studio_at / rekordbox_*_at) carry over too,
-        so a track already analyzed in production stays "done" in the sandbox.
-    """
-    with _connect() as con:
-        con.execute("DROP TABLE IF EXISTS enriched_tracks_test")
-        # Mirror production: SQLite's CREATE TABLE AS preserves columns + types.
-        # We add the AUTOINCREMENT id afterwards by recreating with ROWID alias.
-        con.execute("""
-            CREATE TABLE enriched_tracks_test AS
-            SELECT * FROM enriched_tracks WHERE 1 = 0
-        """)
-        con.execute("CREATE INDEX idx_ett_beatport_id ON enriched_tracks_test(beatport_id)")
-        # Copy over the most-recently-enriched rows AS-IS (every column).
-        con.execute(
-            """
-            INSERT INTO enriched_tracks_test
-            SELECT * FROM enriched_tracks
-            WHERE beatport_id IS NOT NULL
-            ORDER BY enriched_at DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        return con.execute("SELECT COUNT(*) FROM enriched_tracks_test").fetchone()[0]
-
-
-def update_enriched_rich(beatport_id: int, fields: dict, table: str = "enriched_tracks") -> None:
-    """Update the rich-analysis columns for one row in enriched_tracks (or _test).
-
-    Only writes columns that exist on the table; silently ignores unknown keys.
-    """
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
+def update_enriched_rich(beatport_id: int, fields: dict) -> None:
+    """Update the rich-analysis columns for one row in enriched_tracks_full."""
     allowed = {
         "mik_key_secondary", "mik_key_confidence", "tempo_precise", "duration_sec",
         "cue_points_count",
@@ -801,10 +770,48 @@ def update_enriched_rich(beatport_id: int, fields: dict, table: str = "enriched_
     setters = ", ".join(f"{k} = ?" for k in cols)
     with _connect() as con:
         con.execute(
-            f"UPDATE {table} SET {setters} WHERE beatport_id = ?",
+            f"UPDATE {FULL_TABLE} SET {setters} WHERE beatport_id = ?",
             (*cols.values(), beatport_id),
         )
 
 
-# Backward-compat alias (older callers / tests still reference this name).
-update_enriched_tracks_test_rich = lambda bid, fields: update_enriched_rich(bid, fields, "enriched_tracks_test")
+def upsert_full_from_enrich(detected_track_id: int | None, beatport_id: int,
+                             basic: dict, extras: dict | None = None) -> None:
+    """Insert or update enriched_tracks_full from `dj detect enrich`.
+
+    `basic` carries the standard enrich fields (artist, title, bpm, key, genre,
+    release_date, beatport_link, apple_music_url). `extras` carries the
+    Beatport API track-detail fields (mix_name, label, catalog_number, isrc,
+    sub_genre, length_ms) when available.
+
+    Upsert semantics: if a row with this beatport_id already exists, update
+    the basic + extras fields without disturbing analysis fields written by
+    later pipelines.
+    """
+    extras = extras or {}
+    cols = {
+        "detected_track_id": detected_track_id,
+        "beatport_id": beatport_id,
+        **{k: basic.get(k) for k in (
+            "beatport_link", "bpm", "key", "genre", "release_date",
+            "apple_music_url", "artist", "title",
+        )},
+        **{k: extras.get(k) for k in (
+            "mix_name", "label", "catalog_number", "isrc", "sub_genre", "length_ms",
+        )},
+        "enriched_at": _now(),
+    }
+    cols = {k: v for k, v in cols.items() if v is not None}
+    columns = ", ".join(cols.keys())
+    placeholders = ", ".join("?" * len(cols))
+    update_clause = ", ".join(f"{k}=excluded.{k}" for k in cols if k != "beatport_id")
+    with _connect() as con:
+        con.execute(
+            f"""
+            INSERT INTO {FULL_TABLE} ({columns})
+            VALUES ({placeholders})
+            ON CONFLICT(beatport_id) DO UPDATE SET
+                {update_clause}
+            """,
+            tuple(cols.values()),
+        )

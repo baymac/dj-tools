@@ -22,7 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SWIFT_SCRIPT = ROOT / "connections" / "bridge" / "musickit_bridge.swift"
-DEFAULT_DIR = Path.home() / "Documents" / "apple_music_backups"
+sys.path.insert(0, str(ROOT))
+from paths import APPLE_MUSIC_BACKUP_DIR as DEFAULT_DIR
 
 
 def run_musickit_export() -> list[dict]:

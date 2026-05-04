@@ -4,10 +4,9 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path.home() / "Music" / "DJ.Studio" / "dj.db"
+from paths import DB_PATH
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS synced_tracks (

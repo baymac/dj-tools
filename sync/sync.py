@@ -40,7 +40,8 @@ LIB_AND_FAV_KEY = "__library_and_fav__"
 ALL_KEY = "__all__"
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_LOG_DIR = Path.home() / "Music"
+from paths import LOGS_DIR as _LOGS_ROOT
+_LOG_DIR = _LOGS_ROOT / "sync-music-beatport"
 _BEATPORT_CSV = _REPO_ROOT / ".context" / "attachments" / "My Beatport Library.csv"
 
 
@@ -270,7 +271,7 @@ def run_sync(
     run_id = db.start_sync_run(source_key)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
-    log_path = _LOG_DIR / f"{date_str}_apple-music-sync_{run_id}.log"
+    log_path = _LOG_DIR / f"{date_str}_{run_id}.log"
     log_file = log_path.open("w", encoding="utf-8")
     console.print(f"[dim]Log: {log_path}[/dim]")
 

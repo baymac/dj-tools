@@ -40,7 +40,7 @@ from rich.progress import (
 )
 
 from detect import db as detect_db
-from detect.export_to_rekordbox import is_rekordbox_running
+from playlist.to_rekordbox import is_rekordbox_running
 
 console = Console()
 
@@ -216,10 +216,18 @@ def _build_rk_blob(rb_content, anlz_files: list, bpm_x100: int) -> dict:
 
 def run_import_rekordbox_analysis(
     *,
-    table: str = "enriched_tracks_test",
     limit: int = 0,
     force: bool = False,
     verbose: bool = False,
+) -> None:
+    from paths import command_logger
+    with command_logger("import-rekordbox-analysis", console) as log_path:
+        console.print(f"[dim]Log: {log_path}[/dim]")
+        _run_import_rekordbox_analysis_impl(limit=limit, force=force, verbose=verbose)
+
+
+def _run_import_rekordbox_analysis_impl(
+    *, limit: int, force: bool, verbose: bool,
 ) -> None:
     if is_rekordbox_running():
         console.print(
@@ -229,20 +237,20 @@ def run_import_rekordbox_analysis(
         return
 
     detect_db.migrate()
-    pending = detect_db.get_rekordbox_analysis_pending(table=table, force=force)
+    pending = detect_db.get_rekordbox_analysis_pending(force=force)
     if limit:
         pending = pending[:limit]
     if not pending:
         console.print(
-            f"Nothing to ingest. Either no tracks have rekordbox_export_at set yet "
-            f"(run [cyan]export-to-rekordbox[/cyan] first), or all exported tracks have "
-            f"already been ingested."
+            "Nothing to ingest. Either no tracks have rekordbox_export_at set yet "
+            "(run [cyan]export-to-rekordbox[/cyan] first), or all exported tracks have "
+            "already been ingested."
         )
         return
 
     console.print(
-        f"[bold]import-rekordbox-analysis[/bold] ← {len(pending)} tracks from "
-        f"[cyan]{table}[/cyan]{' [yellow](forced)[/yellow]' if force else ''}"
+        f"[bold]import-rekordbox-analysis[/bold] ← {len(pending)} tracks"
+        f"{' [yellow](forced)[/yellow]' if force else ''}"
     )
 
     # Lazy imports
@@ -309,11 +317,11 @@ def run_import_rekordbox_analysis(
                         )
                     # Still write the blob (cues + tags-seen are useful) but DON'T
                     # mark complete, so a later run after analysis re-tries.
-                    detect_db.update_rk_analysis_json(table, bid, json.dumps(blob, separators=(",", ":")))
+                    detect_db.update_rk_analysis_json(bid, json.dumps(blob, separators=(",", ":")))
                     continue
 
-                detect_db.update_rk_analysis_json(table, bid, json.dumps(blob, separators=(",", ":")))
-                detect_db.mark_pipeline_done(table, bid, "rekordbox_analysis_at")
+                detect_db.update_rk_analysis_json(bid, json.dumps(blob, separators=(",", ":")))
+                detect_db.mark_pipeline_done(bid, "rekordbox_analysis_at")
                 counts["ok"] += 1
 
                 if verbose:

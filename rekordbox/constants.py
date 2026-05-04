@@ -27,7 +27,7 @@ def _resolve_paths() -> Tuple[Path, Path]:
 
 
 RB_DB_PATH, RB_SHARE = _resolve_paths()
-RB_BACKUP_DIR = RB_DB_PATH.parent / "claude-backups"
+from paths import REKORDBOX_BACKUP_DIR as RB_BACKUP_DIR
 
 # Camelot key string -> DjmdKey ScaleName
 # Rekordbox stores keys using its own ScaleName values. For Beatport streaming

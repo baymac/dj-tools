@@ -60,6 +60,15 @@ def run_sync_beatport(
     limit: int,
     playlist: str | None = None,
 ) -> None:
+    from paths import command_logger
+    with command_logger("sync-beatport", console) as log_path:
+        console.print(f"[dim]Log: {log_path}[/dim]")
+        _run_sync_beatport_impl(dry_run, verbose, limit, playlist)
+
+
+def _run_sync_beatport_impl(
+    dry_run: bool, verbose: bool, limit: int, playlist: str | None,
+) -> None:
     if dry_run:
         console.print("[yellow]DRY RUN[/yellow] — no changes will be made")
 

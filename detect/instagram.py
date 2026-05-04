@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -10,7 +9,7 @@ from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
 from instagrapi.types import Comment, Media
 
-SESSION_FILE = Path.home() / ".track_detect_ig_session.json"
+from paths import IG_SESSION_FILE as SESSION_FILE
 
 # Signature: (username: str, choice: int) -> str
 # choice 1 = email, 0 = SMS — mirrors instagrapi's ChallengeChoice enum
@@ -40,6 +39,7 @@ def build_client(
             code = two_factor_handler()
             cl.two_factor_login(code)
 
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     if SESSION_FILE.exists():
         try:
             cl.load_settings(SESSION_FILE)

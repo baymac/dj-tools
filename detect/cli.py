@@ -52,7 +52,7 @@ from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
 
 load_dotenv()
 
-CONFIG_FILE = Path.home() / ".track_detect_config.json"
+from paths import DETECT_CONFIG_FILE as CONFIG_FILE
 console = Console()
 
 
@@ -86,6 +86,7 @@ def _save_credentials(username: str, password: str, service: str = "instagram") 
     if "username" in data and service not in data:
         data["instagram"] = {"username": data.pop("username"), "password": data.pop("password", "")}
     data[service] = {"username": username, "password": password}
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data))
     CONFIG_FILE.chmod(0o600)
 
@@ -1104,34 +1105,23 @@ Examples:
                       help="Stop after N tracks (0 = no limit)")
     es_p.add_argument("--verbose", "-v", action="store_true",
                       help="Print per-track update details")
-    es_p.add_argument("--test", action="store_true",
-                      help="Operate on enriched_tracks_test instead of enriched_tracks")
 
     # import-to-studio
     its_p = sub.add_parser(
         "import-to-studio",
-        help="Download Beatport previews → DJ Studio analysis (key/energy/cuepoints/beatgrid) → write DJ Studio library entries",
+        help="Drive DJ Studio analysis (key/energy/cuepoints/beatgrid/stems) → write enriched_tracks_full + DJ Studio library",
     )
-    its_p.add_argument("--table", default="enriched_tracks_test",
-                       help="Source table (default: enriched_tracks_test)")
     its_p.add_argument("--limit", type=int, default=0, metavar="N",
                        help="Stop after N tracks (0 = no limit)")
-    its_p.add_argument("--keep-temp", action="store_true",
-                       help="Keep the temp dir of downloaded preview MP3s")
     its_p.add_argument("--verbose", "-v", action="store_true")
-    its_p.add_argument("--seed", type=int, default=0, metavar="N",
-                       help="(Re)create enriched_tracks_test with the N most-recently-enriched rows first")
     its_p.add_argument("--force", action="store_true",
                        help="Re-process tracks even if dj_studio_at is already set (default: skip done)")
 
     # export-to-rekordbox
     etr_p = sub.add_parser(
         "export-to-rekordbox",
-        help="Push enriched tracks to a rekordbox playlist as Beatport streaming entries (for manual analysis)",
+        help="Push enriched_tracks_full into a rekordbox playlist as Beatport streaming entries (for manual analysis)",
     )
-    etr_p.add_argument("--table", default="enriched_tracks_test",
-                       choices=("enriched_tracks", "enriched_tracks_test"),
-                       help="Source table (default: enriched_tracks_test)")
     etr_p.add_argument("--playlist", default="DJ Tools - Enrich",
                        help="Playlist name in rekordbox (created if missing)")
     etr_p.add_argument("--limit", type=int, default=0, metavar="N")
@@ -1144,8 +1134,6 @@ Examples:
         "import-rekordbox-analysis",
         help="Read PSSI phrase tags + memory/hot cues from rekordbox ANLZ files into rk_analysis_json",
     )
-    ira_p.add_argument("--table", default="enriched_tracks_test",
-                       choices=("enriched_tracks", "enriched_tracks_test"))
     ira_p.add_argument("--limit", type=int, default=0, metavar="N")
     ira_p.add_argument("--force", action="store_true",
                        help="Re-ingest even if rekordbox_analysis_at is already set")
@@ -1674,18 +1662,12 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
     elif cmd == "enrich-studio":
         from detect.enrich_studio import run_enrich_studio
-        table = "enriched_tracks_test" if getattr(args, "test", False) else "enriched_tracks"
-        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose, table=table)
+        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose)
 
     elif cmd == "import-to-studio":
         from detect.import_to_studio import run_import_to_studio
-        if args.seed:
-            n = detect_db.create_enriched_tracks_test(limit=args.seed)
-            console.print(f"[green]✓[/green] Seeded enriched_tracks_test with {n} rows")
         run_import_to_studio(
-            table=args.table,
             limit=args.limit,
-            keep_temp=args.keep_temp,
             verbose=args.verbose,
             force=args.force,
         )
@@ -1693,7 +1675,6 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
     elif cmd == "export-to-rekordbox":
         from detect.export_to_rekordbox import export_to_rekordbox
         export_to_rekordbox(
-            table=args.table,
             playlist_name=args.playlist,
             limit=args.limit,
             dry_run=args.dry_run,
@@ -1703,7 +1684,6 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
     elif cmd == "import-rekordbox-analysis":
         from detect.import_rekordbox_analysis import run_import_rekordbox_analysis
         run_import_rekordbox_analysis(
-            table=args.table,
             limit=args.limit,
             force=args.force,
             verbose=args.verbose,

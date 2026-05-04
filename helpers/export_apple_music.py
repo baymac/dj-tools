@@ -20,7 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_OUTPUT = Path.home() / "Music" / "DJ.Studio" / "apple_music_export.csv"
+import sys as _sys; _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import APPLE_MUSIC_EXPORT_CSV as DEFAULT_OUTPUT
 
 
 # ---------- AppleScript helpers ----------

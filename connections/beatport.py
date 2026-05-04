@@ -21,7 +21,8 @@ USER_AGENT = (
 
 # ---------- Auth ----------
 
-_BROWSER_PROFILE = str(__import__("pathlib").Path.home() / ".playlist-syncer" / "browser-profile")
+from paths import BROWSER_PROFILE_DIR as _BROWSER_PROFILE_PATH
+_BROWSER_PROFILE = str(_BROWSER_PROFILE_PATH)
 
 # Real browser executables on macOS — using the actual binary avoids Cloudflare's
 # headless-Chromium fingerprint detection.

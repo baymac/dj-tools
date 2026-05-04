@@ -26,17 +26,13 @@ dj = "dj_cli:main"
 dev = [
     "pytest>=9.0.3",
 ]
-local-analyse = [
-    "librosa>=0.10",
-    "numpy",
-]
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["dj_cli", "pipeline"]
+py-modules = ["dj_cli", "paths"]
 
 [tool.setuptools.packages.find]
-include = ["detect*", "sync*", "connections*", "djstudio*", "rekordbox*", "helpers*"]
+include = ["detect*", "sync*", "playlist*", "connections*", "djstudio*", "rekordbox*", "helpers*"]

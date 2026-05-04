@@ -26,7 +26,8 @@ from detect.db import mark_enrich_miss
 
 console = Console()
 
-_LOG_DIR = Path.home() / "Music"
+from paths import LOGS_DIR as _LOGS_ROOT
+_LOG_DIR = _LOGS_ROOT / "enrich"
 
 
 def _get_token() -> str:
@@ -166,7 +167,7 @@ def run_enrich(
     run_id = detect_db.start_enrich_run()
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
-    log_path = _LOG_DIR / f"{date_str}_enrich_{run_id}.log"
+    log_path = _LOG_DIR / f"{date_str}_{run_id}.log"
     log_file = log_path.open("w", encoding="utf-8")
     console.print(f"[dim]Log: {log_path}[/dim]")
 
@@ -277,6 +278,48 @@ def run_enrich(
                 continue
 
             detect_db.upsert_enriched(track_id, meta)
+
+            # Also fetch full Beatport catalog metadata + upsert into
+            # enriched_tracks_full. This lands every newly-enriched track in the
+            # canonical full-data table with label/ISRC/sub_genre/etc. already
+            # populated, so import-to-studio doesn't need a separate metadata
+            # fetch later.
+            extras = {}
+            try:
+                full_track = beatport.get_track(meta["beatport_id"])
+                if full_track:
+                    label_obj = (full_track.get("release") or {}).get("label") or {}
+                    sub_genre_obj = full_track.get("sub_genre") or {}
+                    extras = {
+                        "mix_name": full_track.get("mix_name"),
+                        "label": label_obj.get("name") if isinstance(label_obj, dict) else None,
+                        "catalog_number": full_track.get("catalog_number"),
+                        "isrc": full_track.get("isrc"),
+                        "sub_genre": sub_genre_obj.get("name") if isinstance(sub_genre_obj, dict) else None,
+                        "length_ms": full_track.get("length_ms"),
+                    }
+            except Exception:
+                pass  # Beatport metadata is non-critical; basic enrich already succeeded.
+
+            basic = {
+                "beatport_link": meta.get("beatport_link"),
+                "bpm": meta.get("bpm"),
+                "key": meta.get("key"),
+                "genre": meta.get("genre"),
+                "release_date": meta.get("release_date"),
+                "artist": artist,
+                "title": title,
+            }
+            try:
+                detect_db.upsert_full_from_enrich(
+                    detected_track_id=track_id,
+                    beatport_id=meta["beatport_id"],
+                    basic=basic,
+                    extras=extras,
+                )
+            except Exception as e:
+                _log(f"upsert_full_failed  bp:{meta['beatport_id']}  {e}")
+
             counts["found"] += 1
             _log(
                 f"enriched  {artist} — {title}  →  bp:{meta['beatport_id']}  score={score:.2f}",
