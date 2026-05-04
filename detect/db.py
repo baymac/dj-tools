@@ -162,10 +162,13 @@ def migrate() -> None:
             ("analysis_json",       "TEXT"),
             # Forward-looking — populated later by a rekordbox-PSSI reader.
             ("rekordbox_pssi_json", "TEXT"),
+            # Rekordbox enrichment (added by import-rekordbox-analysis):
+            ("rk_analysis_json",      "TEXT"),  # phrases (PSSI) + memory cues + hot cues + mood
             # Per-source completion timestamps. NULL = not done; ISO8601 = done.
             # Lets each pipeline own a single column for skip/re-run logic.
-            ("dj_studio_at",        "TEXT"),
-            ("rekordbox_pssi_at",   "TEXT"),
+            ("dj_studio_at",          "TEXT"),  # import-to-studio finished (DJ Studio analysis)
+            ("rekordbox_export_at",   "TEXT"),  # export-to-rekordbox pushed track + playlist entry
+            ("rekordbox_analysis_at", "TEXT"),  # import-rekordbox-analysis ingested ANLZ data
         ]
         for col, typ in _ENRICHED_RICH_COLS:
             _add_column_if_missing(con, "enriched_tracks", col, typ)
@@ -662,19 +665,70 @@ def get_import_to_studio_pending(table: str = "enriched_tracks", *, force: bool 
 
 
 def mark_pipeline_done(table: str, beatport_id: int, column: str) -> None:
-    """Stamp a per-source completion column with the current ISO timestamp.
-
-    `column` must be one of: dj_studio_at, rekordbox_pssi_at.
-    """
+    """Stamp a per-source completion column with the current ISO timestamp."""
     if table not in _STUDIO_TABLES:
         raise ValueError(f"Unsupported table: {table}")
-    if column not in {"dj_studio_at", "rekordbox_pssi_at"}:
+    if column not in {"dj_studio_at", "rekordbox_export_at", "rekordbox_analysis_at"}:
         raise ValueError(f"Unsupported column: {column}")
     with _connect() as con:
         _add_column_if_missing(con, table, column, "TEXT")
         con.execute(
             f"UPDATE {table} SET {column} = ? WHERE beatport_id = ?",
             (_now(), beatport_id),
+        )
+
+
+def get_export_to_rekordbox_pending(table: str = "enriched_tracks", *, force: bool = False) -> list[sqlite3.Row]:
+    """Tracks not yet pushed into a rekordbox playlist.
+
+    Skip rule: rekordbox_export_at IS NULL.
+    """
+    if table not in _STUDIO_TABLES:
+        raise ValueError(f"Unsupported table: {table}")
+    with _connect() as con:
+        _add_column_if_missing(con, table, "rekordbox_export_at", "TEXT")
+        where = "" if force else "WHERE e.rekordbox_export_at IS NULL"
+        return con.execute(
+            f"""SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm,
+                       e.beatport_link, e.key, e.genre, e.duration_sec, e.mik_key
+                  FROM {table} e
+                  {where}
+                  ORDER BY e.id""",
+        ).fetchall()
+
+
+def get_rekordbox_analysis_pending(table: str = "enriched_tracks", *, force: bool = False) -> list[sqlite3.Row]:
+    """Tracks pushed to rekordbox but not yet ingested back from ANLZ.
+
+    Skip rule: rekordbox_export_at IS NOT NULL  AND  rekordbox_analysis_at IS NULL.
+    Won't try to ingest tracks that haven't been pushed yet.
+    """
+    if table not in _STUDIO_TABLES:
+        raise ValueError(f"Unsupported table: {table}")
+    with _connect() as con:
+        _add_column_if_missing(con, table, "rekordbox_export_at", "TEXT")
+        _add_column_if_missing(con, table, "rekordbox_analysis_at", "TEXT")
+        where = (
+            "WHERE e.rekordbox_export_at IS NOT NULL"
+            if force
+            else "WHERE e.rekordbox_export_at IS NOT NULL AND e.rekordbox_analysis_at IS NULL"
+        )
+        return con.execute(
+            f"""SELECT e.id, e.beatport_id, e.artist, e.title
+                  FROM {table} e
+                  {where}
+                  ORDER BY e.id""",
+        ).fetchall()
+
+
+def update_rk_analysis_json(table: str, beatport_id: int, blob: str) -> None:
+    if table not in _STUDIO_TABLES:
+        raise ValueError(f"Unsupported table: {table}")
+    with _connect() as con:
+        _add_column_if_missing(con, table, "rk_analysis_json", "TEXT")
+        con.execute(
+            f"UPDATE {table} SET rk_analysis_json = ? WHERE beatport_id = ?",
+            (blob, beatport_id),
         )
 
 

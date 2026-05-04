@@ -51,6 +51,10 @@ dj
 │   ├── enrich-studio                 [--dry-run] [--limit N] [--verbose] [--test]
 │   ├── import-to-studio              [--seed N] [--limit N] [--keep-temp] [--verbose] [--force]
 │   │                                 [--table enriched_tracks|enriched_tracks_test]
+│   ├── export-to-rekordbox           [--table enriched_tracks|enriched_tracks_test]
+│   │                                 [--playlist NAME] [--limit N] [--dry-run] [--force]
+│   ├── import-rekordbox-analysis     [--table enriched_tracks|enriched_tracks_test]
+│   │                                 [--limit N] [--force] [--verbose]
 │   ├── enriched                      [-n N]
 │   ├── enrich-runs                   [-n N]
 │   └── enrich-tracks <type> <id>     [--misses]
@@ -271,9 +275,79 @@ Every field comes directly from DJ Studio's own outputs:
 
 **Not stored** (intentionally): semantic phrase labels (intro/chorus/breakdown/etc.). DJ Studio doesn't produce those — its renderer never calls the dormant ML phrase model and real `track-structures-table.phraseData` arrays are empty.
 
-For real labelled phrases (Intro / Verse / Pre-Chorus / Chorus / Bridge / Outro), use DJ Studio's built-in rekordbox export to push tracks into rekordbox, run rekordbox's Analyze Tracks, and a future PSSI reader will ingest those tags into the `rekordbox_pssi_json` column.
+For real labelled phrases, use the rekordbox round-trip below (`export-to-rekordbox` → manual Analyze in rekordbox → `import-rekordbox-analysis`).
 
 When you reopen DJ Studio after running, those tracks appear in your library fully analyzed — same as if you'd added them to a mix and let DJ Studio process them.
+
+#### export-to-rekordbox — push enriched tracks into a rekordbox playlist
+
+Adds the tracks to your rekordbox library as Beatport streaming entries (`FileType=20`, the same kind rekordbox creates when you drag a Beatport track from its in-app browser) and to a named playlist. **Doesn't push cue points** — those would shadow whatever rekordbox computes during analysis. Tracks land bare; rekordbox fills in beat grid + cue points + phrase tags itself.
+
+After running, open rekordbox, find the playlist, right-click → **Analyze Tracks**. Then run `import-rekordbox-analysis` (below) to ingest the results.
+
+**Prerequisite:** rekordbox MUST be quit (locks `master.db`). Pre-flight check aborts if it's running. Backs up `master.db` before any write to `<rekordbox-share>/claude-backups/`.
+
+**Idempotent:** skip rule is `rekordbox_export_at IS NULL`. Re-runs pick up only new tracks. `--force` overrides.
+
+```bash
+uv run dj_cli.py detect export-to-rekordbox --limit 5 --dry-run
+uv run dj_cli.py detect export-to-rekordbox --table enriched_tracks_test --playlist "DJ Tools - Enrich"
+```
+
+#### import-rekordbox-analysis — phase 2: read ANLZ data into rk_analysis_json
+
+After you've manually Analyzed the tracks in rekordbox, this reads the resulting ANLZ files and saves a JSON blob into `enriched_tracks_test.rk_analysis_json`. What we extract (none of which DJ Studio produces):
+
+| Source | Field |
+|---|---|
+| PSSI tag | `mood_id`, `mood_name` (Low / Mid / High EDM); per-phrase `{kind_id, label, start_beat, end_beat, length_beats, start_sec, end_sec}` with semantic labels (Intro / Verse / Bridge / Chorus / Outro for Mood Low/Mid; Intro / Up / Down / Chorus / Outro for Mood High) |
+| PCO2 / PCOB tag | `memory_cues[]` and `hot_cues[]`, each with `{time_sec, loop_time_sec, name, color_id, type_id}` — rekordbox auto-places its own based on Mood; usually more numerous and more useful than MIK's 8 |
+| `DjmdContent.BPM` | `rekordbox_bpm` (rekordbox's own beatgrid BPM, may differ slightly from `tempo_precise` / `ai-beatgrid`) |
+| ANLZ tag list | `tags_seen` — diagnostic list of all tags found |
+
+**Idempotent:** skip rule is `rekordbox_export_at IS NOT NULL AND rekordbox_analysis_at IS NULL`. Tracks not yet pushed are skipped (run `export-to-rekordbox` first). Tracks pushed but not yet analyzed in rekordbox produce a partial blob and are NOT marked complete — re-run after analyzing.
+
+**Prerequisite:** rekordbox MUST be quit.
+
+```bash
+uv run dj_cli.py detect import-rekordbox-analysis --table enriched_tracks_test --verbose
+```
+
+Sample `rk_analysis_json` for a track:
+
+```json
+{
+  "version": 1,
+  "rekordbox_track_id": "12345",
+  "mood_id": 3,
+  "mood_name": "High (EDM)",
+  "phrases": [
+    {"index": 0, "kind_id": 1, "label": "Intro", "start_beat": 1, "end_beat": 32, "length_beats": 31, "start_sec": 0.0, "end_sec": 14.42},
+    {"index": 1, "kind_id": 2, "label": "Up", "start_beat": 32, "end_beat": 64, "length_beats": 32, "start_sec": 14.42, "end_sec": 28.84},
+    {"index": 2, "kind_id": 4, "label": "Chorus", "start_beat": 64, "end_beat": 128, "length_beats": 64, "start_sec": 28.84, "end_sec": 57.68}
+  ],
+  "memory_cues": [{"time_sec": 0.0, "name": "Intro", "color_id": 1}],
+  "hot_cues":    [{"time_sec": 28.84, "name": "Drop", "color_id": 6}],
+  "rekordbox_bpm": 129.18,
+  "tags_seen": ["PCOB", "PCO2", "PQT2", "PQTZ", "PSSI", "PWAV", "PWV5", "PWV6"]
+}
+```
+
+**Full round-trip workflow:**
+
+```bash
+# 1. DJ Studio analysis (key/energy/cues/stems) — quit DJ Studio first
+uv run dj_cli.py detect import-to-studio --seed 100 --verbose
+
+# 2. Push to rekordbox — quit rekordbox first
+uv run dj_cli.py detect export-to-rekordbox --table enriched_tracks_test
+
+# 3. Manually open rekordbox → playlist → right-click → Analyze Tracks
+#    (this writes ANLZ files with PSSI phrase tags + auto-cues)
+
+# 4. Quit rekordbox → ingest the analysis back
+uv run dj_cli.py detect import-rekordbox-analysis --table enriched_tracks_test --verbose
+```
 
 #### Viewing enriched data
 
