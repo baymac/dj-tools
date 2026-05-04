@@ -1124,22 +1124,6 @@ Examples:
     its_p.add_argument("--force", action="store_true",
                        help="Re-process tracks even if dj_studio_at is already set (default: skip done)")
 
-    # export-to-rekordbox
-    etr_p = sub.add_parser(
-        "export-to-rekordbox",
-        help="Push tracks to a rekordbox playlist as Beatport streaming entries (for manual analysis)",
-    )
-    etr_p.add_argument("--table", default="enriched_tracks_test",
-                       choices=("enriched_tracks", "enriched_tracks_test"),
-                       help="Source table (default: enriched_tracks_test)")
-    etr_p.add_argument("--playlist", default="DJ Tools - Enrich",
-                       help="Playlist name in rekordbox (created if missing)")
-    etr_p.add_argument("--limit", type=int, default=0, metavar="N",
-                       help="Stop after N tracks")
-    etr_p.add_argument("--dry-run", action="store_true")
-    etr_p.add_argument("--force", action="store_true",
-                       help="Push tracks even if rekordbox_export_at is already set")
-
     # sessions
     _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit")
     sess_p = sub.add_parser("sessions", help="List all sessions for a source type")
@@ -1676,16 +1660,6 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             limit=args.limit,
             keep_temp=args.keep_temp,
             verbose=args.verbose,
-            force=args.force,
-        )
-
-    elif cmd == "export-to-rekordbox":
-        from detect.export_to_rekordbox import export_to_rekordbox
-        export_to_rekordbox(
-            table=args.table,
-            playlist_name=args.playlist,
-            limit=args.limit,
-            dry_run=args.dry_run,
             force=args.force,
         )
 

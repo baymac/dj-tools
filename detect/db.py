@@ -166,7 +166,6 @@ def migrate() -> None:
             # Lets each pipeline own a single column for skip/re-run logic.
             ("dj_studio_at",        "TEXT"),
             ("rekordbox_pssi_at",   "TEXT"),
-            ("rekordbox_export_at", "TEXT"),
         ]
         for col, typ in _ENRICHED_RICH_COLS:
             _add_column_if_missing(con, "enriched_tracks", col, typ)
@@ -662,33 +661,14 @@ def get_import_to_studio_pending(table: str = "enriched_tracks", *, force: bool 
         ).fetchall()
 
 
-def get_export_to_rekordbox_pending(table: str = "enriched_tracks", *, force: bool = False) -> list[sqlite3.Row]:
-    """Tracks not yet exported to a rekordbox playlist.
-
-    Skip rule: `rekordbox_export_at IS NULL`. Pass force=True to re-export.
-    """
-    if table not in _STUDIO_TABLES:
-        raise ValueError(f"Unsupported table: {table}")
-    with _connect() as con:
-        _add_column_if_missing(con, table, "rekordbox_export_at", "TEXT")
-        where = "" if force else "WHERE e.rekordbox_export_at IS NULL"
-        return con.execute(
-            f"""SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm,
-                       e.beatport_link, e.key, e.genre, e.duration_sec, e.mik_key
-                FROM {table} e
-                {where}
-                ORDER BY e.id""",
-        ).fetchall()
-
-
 def mark_pipeline_done(table: str, beatport_id: int, column: str) -> None:
     """Stamp a per-source completion column with the current ISO timestamp.
 
-    `column` must be one of: dj_studio_at, rekordbox_pssi_at, rekordbox_export_at.
+    `column` must be one of: dj_studio_at, rekordbox_pssi_at.
     """
     if table not in _STUDIO_TABLES:
         raise ValueError(f"Unsupported table: {table}")
-    if column not in {"dj_studio_at", "rekordbox_pssi_at", "rekordbox_export_at"}:
+    if column not in {"dj_studio_at", "rekordbox_pssi_at"}:
         raise ValueError(f"Unsupported column: {column}")
     with _connect() as con:
         _add_column_if_missing(con, table, column, "TEXT")
