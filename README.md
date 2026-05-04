@@ -294,6 +294,8 @@ Uses your DJ Studio account + the bundled SDK to fetch full Beatport tracks, run
 
 **`cf.dj.studio`** is DJ Studio's Cloudflare-hosted classification API. The local WASM extracts pitch/energy features; the server classifies them into a Camelot key + 1-10 energy. Same flow the desktop app uses internally — bit-identical output. Auth uses your DJ Studio account JWT (decrypted from `encryptedToken-v2.dat` and refreshed via `app-services.dj.studio`).
 
+This command runs `caffeinate -i` automatically — your Mac won't sleep mid-run. Same applies to `detect enrich` (sequential Beatport API calls) and `detect radio-garden` (indefinite monitoring loop).
+
 ```bash
 # Small sanity-check batch
 uv run dj_cli.py detect import-to-studio --limit 5 --verbose

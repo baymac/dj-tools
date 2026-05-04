@@ -19,6 +19,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from caffeinate import caffeinate
 from connections import beatport as bp_api
 from connections.matching import MATCH_THRESHOLD, best_match, search_query, strip_remix
 from detect import db as detect_db
@@ -190,7 +191,7 @@ def run_enrich(
 
     counts = {"seen": 0, "found": 0, "not_found": 0, "fuzzy_miss": 0, "failed": 0}
 
-    with progress:
+    with caffeinate(), progress:
         task = progress.add_task("Enriching…", total=len(tracks))
 
         for track in tracks:

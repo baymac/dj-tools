@@ -46,6 +46,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from caffeinate import caffeinate
 from detect import db as detect_db
 
 console = Console()
@@ -618,7 +619,7 @@ def run_import_to_studio(
     force: bool = False,
 ) -> None:
     from paths import command_logger
-    with command_logger("import-to-studio", console) as log_path:
+    with command_logger("import-to-studio", console) as log_path, caffeinate():
         console.print(f"[dim]Log: {log_path}[/dim]")
         _run_import_to_studio_impl(limit=limit, verbose=verbose, force=force)
 
