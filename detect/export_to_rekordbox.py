@@ -67,27 +67,13 @@ def _split_title(title: str) -> tuple[str, str]:
     return t, subtitle
 
 
-def _read_tracks_for_export(con: sqlite3.Connection, table: str) -> list[dict]:
-    """Pull the minimal columns needed to create a rekordbox Beatport entry."""
-    rows = con.execute(
-        f"""
-        SELECT artist, title, beatport_id, beatport_link, bpm,
-               COALESCE(mik_key, key) AS key,
-               genre, COALESCE(duration_sec, 0) AS duration_sec
-          FROM {table}
-         WHERE beatport_id IS NOT NULL
-         ORDER BY id
-        """
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def export_to_rekordbox(
     *,
     table: str = "enriched_tracks_test",
     playlist_name: str = "DJ Tools - Enrich",
     limit: int = 0,
     dry_run: bool = False,
+    force: bool = False,
 ) -> None:
     if is_rekordbox_running():
         console.print(
@@ -100,20 +86,20 @@ def export_to_rekordbox(
     from pyrekordbox import Rekordbox6Database
     from pyrekordbox.db6 import tables
 
-    dj_db_path = Path.home() / "Music" / "DJ.Studio" / "dj.db"
-    if not dj_db_path.is_file():
-        console.print(f"[red]Not found: {dj_db_path}[/red]")
-        return
+    # Use the shared db helper so skip rule (rekordbox_export_at IS NULL) +
+    # forward-compat schema migrations stay in one place.
+    from detect import db as detect_db
 
-    con = sqlite3.connect(dj_db_path)
-    con.row_factory = sqlite3.Row
-    rows = _read_tracks_for_export(con, table)
-    con.close()
-
+    detect_db.migrate()  # ensures rekordbox_export_at column exists
+    pending = detect_db.get_export_to_rekordbox_pending(table=table, force=force)
+    rows = [dict(r) for r in pending]
     if limit:
         rows = rows[:limit]
     if not rows:
-        console.print(f"No tracks in {table} with beatport_id.")
+        console.print(
+            f"Nothing to export — every track in {table} already has "
+            "rekordbox_export_at set.\n[dim]Use --force to re-push all tracks.[/dim]"
+        )
         return
 
     console.print(f"[bold]export-to-rekordbox[/bold] ← {len(rows)} tracks from [cyan]{table}[/cyan]")
@@ -195,10 +181,13 @@ def export_to_rekordbox(
 
                 if str(content.ID) in existing_track_ids:
                     counts["already_in_playlist"] += 1
+                    if not dry_run:
+                        detect_db.mark_pipeline_done(table, bid, "rekordbox_export_at")
                     continue
 
                 if not dry_run:
                     db.add_to_playlist(playlist=playlist, content=content, track_no=pos)
+                    detect_db.mark_pipeline_done(table, bid, "rekordbox_export_at")
                 counts["added_to_playlist"] += 1
 
         if not dry_run:

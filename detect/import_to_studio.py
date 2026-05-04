@@ -589,6 +589,7 @@ def run_import_to_studio(
     limit: int = 0,
     keep_temp: bool = False,  # unused now (no temp dir), kept for CLI compat
     verbose: bool = False,
+    force: bool = False,
 ) -> None:
     if is_dj_studio_running():
         console.print(
@@ -600,13 +601,16 @@ def run_import_to_studio(
 
     console.print(f"[bold]import-to-studio[/bold] ← [cyan]{table}[/cyan]  (Path A: full tracks via DJ Studio SDK)")
 
-    rows = detect_db.get_studio_enrichable_tracks(table=table)
+    rows = detect_db.get_import_to_studio_pending(table=table, force=force)
     if limit:
         rows = rows[:limit]
     if not rows:
-        console.print("Nothing to import — every row already has mik_key.")
+        console.print(
+            "Nothing to import — every track in this table already has dj_studio_at set.\n"
+            "[dim]Use --force to re-process all tracks.[/dim]"
+        )
         return
-    console.print(f"{len(rows)} tracks queued.")
+    console.print(f"{len(rows)} tracks queued{' [yellow](forced re-run)[/yellow]' if force else ''}.")
 
     try:
         access_jwt = _get_dj_studio_access_token()
@@ -678,8 +682,10 @@ def run_import_to_studio(
         rich = dict(shaped["rich"])
         rich.update({k: v for k, v in bp_meta.items() if v is not None})
         rich["analysis_json"] = shaped["analysis_json"]
-        if table == "enriched_tracks_test":
-            detect_db.update_enriched_tracks_test_rich(bid, rich)
+        # Write rich fields to whichever table is being driven (production or
+        # the test sandbox). Then stamp dj_studio_at so re-runs skip this row.
+        detect_db.update_enriched_rich(bid, rich, table=table)
+        detect_db.mark_pipeline_done(table, bid, "dj_studio_at")
 
         if verbose:
             t = res["result"].get("timing_ms", {})

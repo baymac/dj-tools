@@ -1121,6 +1121,8 @@ Examples:
     its_p.add_argument("--verbose", "-v", action="store_true")
     its_p.add_argument("--seed", type=int, default=0, metavar="N",
                        help="(Re)create enriched_tracks_test with the N most-recently-enriched rows first")
+    its_p.add_argument("--force", action="store_true",
+                       help="Re-process tracks even if dj_studio_at is already set (default: skip done)")
 
     # export-to-rekordbox
     etr_p = sub.add_parser(
@@ -1135,6 +1137,8 @@ Examples:
     etr_p.add_argument("--limit", type=int, default=0, metavar="N",
                        help="Stop after N tracks")
     etr_p.add_argument("--dry-run", action="store_true")
+    etr_p.add_argument("--force", action="store_true",
+                       help="Push tracks even if rekordbox_export_at is already set")
 
     # sessions
     _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit")
@@ -1672,6 +1676,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             limit=args.limit,
             keep_temp=args.keep_temp,
             verbose=args.verbose,
+            force=args.force,
         )
 
     elif cmd == "export-to-rekordbox":
@@ -1681,6 +1686,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             playlist_name=args.playlist,
             limit=args.limit,
             dry_run=args.dry_run,
+            force=args.force,
         )
 
     elif cmd == "sessions":
