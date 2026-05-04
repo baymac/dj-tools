@@ -29,7 +29,7 @@ _TOKEN_FILE = Path.home() / "Library/Application Support/DJ.Studio/encryptedToke
 _REFRESH_URL = "https://app-services.dj.studio/api/login/v2/token/refresh/json"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NODE_HELPER = REPO_ROOT / "poc" / "mik_analyze.js"
+NODE_HELPER = REPO_ROOT / "detect" / "dj_studio_analyze.js"
 
 # DJ Studio Camelot integer (0-23) -> Camelot string. From earlier reverse-eng.
 MIK_CAMELOT = {

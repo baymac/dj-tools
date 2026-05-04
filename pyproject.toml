@@ -13,6 +13,7 @@ dependencies = [
     "yt-dlp>=2024.1",
     "mutagen>=1.47",
     "cryptography>=42",
+    "psutil>=5.9",
     # sync
     "playwright>=1.58",
     "playwright-stealth>=1.0",
