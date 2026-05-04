@@ -5,10 +5,6 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-import httpx
-
-_USER_AGENT = "dj-tools/1.0 (track-detect; github.com/baymac/dj-tools)"
-
 # Separators between artist and title in a track line
 _SEP_RE = re.compile(r"\s+[-–—]\s+")
 # Labels in square brackets at end of title: "[Drumcode]" / "[ Kompakt ]"
@@ -80,36 +76,58 @@ def _extract_from_text(text: str) -> list[dict]:
 
 def fetch_post(url: str) -> dict:
     """
-    Fetch a Reddit post via the public JSON API.
+    Fetch a Reddit post using Playwright (bypasses the JSON API 403 block).
+    Uses old.reddit.com for simpler, server-rendered HTML.
     Returns: {title, selftext, subreddit, author, post_url, top_comment}
     """
-    api_url = url.rstrip("/").split("?")[0] + ".json"
-    headers = {"User-Agent": _USER_AGENT}
-    with httpx.Client(follow_redirects=True, timeout=30, headers=headers) as client:
-        resp = client.get(api_url)
-        resp.raise_for_status()
-        data = resp.json()
+    from playwright.sync_api import sync_playwright
 
-    post_data = data[0]["data"]["children"][0]["data"]
+    old_url = re.sub(r"https?://(www\.)?reddit\.com", "https://old.reddit.com", url, count=1)
 
-    # Find best comment: prefer stickied/mod, else first substantial top-level
-    top_comment = ""
-    for child in data[1]["data"]["children"]:
-        if child.get("kind") != "t1":
-            continue
-        c = child["data"]
-        body = c.get("body", "")
-        if c.get("stickied") or c.get("distinguished") == "moderator":
-            top_comment = body
-            break
-        if not top_comment and len(body) > 80:
-            top_comment = body
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(old_url, wait_until="domcontentloaded", timeout=30_000)
+
+            title = (page.text_content(".top-matter .title a.title") or "").strip()
+
+            subreddit = ""
+            sr = page.query_selector(".subreddit")
+            if sr:
+                subreddit = (sr.text_content() or "").strip().lstrip("r/")
+
+            author = ""
+            auth = page.query_selector(".tagline .author")
+            if auth:
+                author = (auth.text_content() or "").strip()
+
+            selftext = ""
+            body = page.query_selector(".expando .usertext-body .md")
+            if body:
+                selftext = (body.inner_text() or "").strip()
+
+            # Best comment: prefer stickied/mod comment, then first substantial one
+            top_comment = ""
+            for el in page.query_selector_all(".commentarea .thing.comment")[:10]:
+                classes = el.get_attribute("class") or ""
+                body_el = el.query_selector(".usertext-body .md")
+                if not body_el:
+                    continue
+                text = (body_el.inner_text() or "").strip()
+                if "stickied" in classes or "moderator" in classes:
+                    top_comment = text
+                    break
+                if not top_comment and len(text) > 80:
+                    top_comment = text
+        finally:
+            browser.close()
 
     return {
-        "title": post_data.get("title", ""),
-        "selftext": post_data.get("selftext", ""),
-        "subreddit": post_data.get("subreddit", ""),
-        "author": post_data.get("author", ""),
+        "title": title,
+        "selftext": selftext,
+        "subreddit": subreddit,
+        "author": author,
         "post_url": url,
         "top_comment": top_comment,
     }
