@@ -172,6 +172,10 @@ def migrate() -> None:
         ]
         for col, typ in _ENRICHED_RICH_COLS:
             _add_column_if_missing(con, "enriched_tracks", col, typ)
+            # Mirror to enriched_tracks_test if it exists. Created via
+            # CREATE TABLE AS, so it inherits whatever columns enriched_tracks
+            # had at seed time — but later migrations need to be re-applied.
+            _add_column_if_missing(con, "enriched_tracks_test", col, typ)
 
 
 def _add_column_if_missing(con: sqlite3.Connection, table: str, col: str, typ: str) -> None:
