@@ -322,10 +322,15 @@ async function runStems(monoSamples) {
 // metrics without re-decoding the binary.
 const BUCKET_SAMPLES = 1024;
 function compressStemToView(stemSamples) {
-  if (!stemSamples) return { compressed_b64: null, avg_rms: null, peak_rms: null };
+  if (!stemSamples) return { compressed_b64: null, avg_rms: null, peak_rms: null, rms_per_bucket: null };
   const n = Math.floor(stemSamples.length / BUCKET_SAMPLES);
   const out = Buffer.alloc(2 + n * 8);
   out.writeUInt16LE(0xFFFF, 0);
+  // We also return the per-bucket RMS series so the Python orchestrator can
+  // compute per-phrase stats without re-decoding the binary view.
+  // Quantised to uint16 (same precision as DJ Studio's stored format) to keep
+  // the IPC payload small — 14k buckets/track × 2 bytes × 4 stems ≈ 110KB.
+  const buckets = new Uint16Array(n);
   let sumRms = 0;
   let peakRms = 0;
   for (let i = 0; i < n; i++) {
@@ -342,11 +347,16 @@ function compressStemToView(stemSamples) {
     if (amp < 0) amp = 0;
     if (amp > 65535) amp = 65535;
     out.writeUInt16LE(amp, 2 + i * 8 + 6);
+    buckets[i] = amp;
   }
   return {
     compressed_b64: out.toString('base64'),
     avg_rms: n ? sumRms / n : 0,
     peak_rms: peakRms,
+    // Send the bucket series back as base64 of the uint16 LE buffer — Python
+    // can numpy.frombuffer it (or struct.unpack) without parsing the 8-byte
+    // record format we use for DJ Studio's on-disk file.
+    rms_per_bucket_b64: Buffer.from(buckets.buffer, buckets.byteOffset, buckets.byteLength).toString('base64'),
   };
 }
 
@@ -425,6 +435,14 @@ async function analyzeTrack(beatportId, accessJwt) {
       drums:  compressed.drums.compressed_b64,
       bass:   compressed.bass.compressed_b64,
       other:  compressed.other.compressed_b64,
+    },
+    stems_rms_buckets_b64: {
+      vocals: compressed.vocals.rms_per_bucket_b64,
+      drums:  compressed.drums.rms_per_bucket_b64,
+      bass:   compressed.bass.rms_per_bucket_b64,
+      other:  compressed.other.rms_per_bucket_b64,
+      bucket_samples: BUCKET_SAMPLES,
+      sample_rate: TARGET_SR,
     },
     stem_metrics,
     stems_process_time_ms: stems.process_time_ms,
