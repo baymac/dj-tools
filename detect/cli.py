@@ -46,6 +46,7 @@ from .db import (
     update_session_progress,
 )
 from .parser import has_track_info, parse_tracks
+from .reddit import extract_tracks as reddit_extract_tracks, fetch_post as reddit_fetch_post
 from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
 
 load_dotenv()
@@ -931,8 +932,10 @@ Examples:
   uv run dj_cli.py detect mixcloud https://www.mixcloud.com/djname/mix/
   uv run dj_cli.py detect youtube https://www.youtube.com/watch?v=XXXX
   uv run dj_cli.py detect podbean https://www.podbean.com/ew/pb-XXXX
+  uv run dj_cli.py detect reddit https://www.reddit.com/r/HypeTracks/comments/XXXXX/
   uv run dj_cli.py detect history -n 50
   uv run dj_cli.py detect mixcloud-history
+  uv run dj_cli.py detect reddit-history
 """,
     )
     sub = detect_p.add_subparsers(dest="detect_command")
@@ -994,6 +997,19 @@ Examples:
     pb_p.add_argument("--output", "-o", default=None, help="Write tracklist to JSON file")
     pb_p.add_argument("--json", "-j", action="store_true", dest="json_output",
                       help="Print tracklist as JSON to stdout")
+
+    # reddit
+    rd_p = sub.add_parser("reddit", help="Extract tracks from a Reddit text post")
+    rd_p.add_argument("url", help="Reddit post URL")
+
+    # reddit-history
+    rd_hist_p = sub.add_parser("reddit-history", help="Browse Reddit post scans")
+    rd_hist_p.add_argument("-n", "--limit", type=int, default=20)
+
+    # reddit-delete-session
+    rd_del_p = sub.add_parser("reddit-delete-session", help="Delete a Reddit session and its tracks")
+    rd_del_p.add_argument("session_id", type=int)
+    rd_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
 
     # history
     hist_p = sub.add_parser("history", help="Show all detected tracks from every source")
@@ -1089,7 +1105,7 @@ Examples:
                       help="Print per-track update details")
 
     # sessions
-    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean")
+    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit")
     sess_p = sub.add_parser("sessions", help="List all sessions for a source type")
     sess_p.add_argument("type", choices=_TYPES, metavar="TYPE",
                         help=f"Source type: {', '.join(_TYPES)}")
@@ -1119,7 +1135,7 @@ Examples:
         help="Show detected tracks + enrichment status for a session",
     )
     st_p.add_argument("type", choices=_TYPES, metavar="TYPE",
-                      help=f"Source type: {', '.join(_TYPES)}")
+                      help=f"Source type: {', '.join(_TYPES)}")  # _TYPES defined above
     st_p.add_argument("session_id", type=int)
     st_p.add_argument("--misses", action="store_true",
                       help="Show only tracks with not_found or fuzzy_miss outcome")
@@ -1138,7 +1154,78 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
     cmd = args.detect_command
 
-    if cmd == "instagram":
+    if cmd == "reddit":
+        url = args.url
+        prior = find_session(url)
+        if prior:
+            n_tracks = len(tracks_for_session(prior["id"]))
+            console.print(
+                f"\n[dim]This post was already scanned (session #{prior['id']}, "
+                f"{n_tracks} track(s) found).[/dim]\n"
+            )
+            if not _confirm("Scan again?", default=False):
+                sys.exit(0)
+
+        console.print(f"[dim]Fetching Reddit post…[/dim]")
+        try:
+            post = reddit_fetch_post(url)
+        except Exception as exc:
+            console.print(f"[red]Failed to fetch post:[/red] {exc}")
+            sys.exit(1)
+
+        tracks = reddit_extract_tracks(post)
+        if not tracks:
+            console.print("[yellow]No tracks found in post text.[/yellow]")
+            sys.exit(0)
+
+        console.print(f"\n[bold]Found {len(tracks)} track(s) in r/{post['subreddit']} — {post['title']}[/bold]\n")
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("#",      style="dim", width=4)
+        t.add_column("Artist", min_width=22)
+        t.add_column("Title",  min_width=28)
+        for tr in tracks:
+            t.add_row(str(tr["position"]), tr["artist"], tr["title"])
+        console.print(t)
+
+        session_id = create_session(
+            "reddit", url, post["title"],
+            uploader=post["subreddit"],
+            caption=post["selftext"][:500] if post["selftext"] else None,
+        )
+        insert_tracks(tracks, source="reddit", session_id=session_id)
+        end_session(session_id)
+        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+
+    elif cmd == "reddit-history":
+        sessions = list_sessions("reddit", args.limit)
+        if not sessions:
+            console.print("[dim]No Reddit sessions yet.[/dim]")
+            return
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("ID",         style="dim", width=5)
+        t.add_column("Title",      min_width=40)
+        t.add_column("Subreddit",  min_width=16)
+        t.add_column("Scanned",    style="dim", width=19)
+        t.add_column("Tracks",     style="dim", width=7)
+        for r in sessions:
+            t.add_row(str(r["id"]), r["title"] or "—", r["uploader"] or "—",
+                      r["started_at"][:19], str(r["track_count"]))
+        console.print(t)
+
+    elif cmd == "reddit-delete-session":
+        session_id = args.session_id
+        rows = tracks_for_session(session_id)
+        if not rows:
+            console.print(f"[yellow]Session #{session_id} not found.[/yellow]")
+            sys.exit(1)
+        if not args.force:
+            console.print(f"[yellow]Delete Reddit session #{session_id} ({len(rows)} track(s))?[/yellow]")
+            if not _confirm("Confirm delete", default=False):
+                sys.exit(0)
+        n = delete_session(session_id)
+        console.print(f"[green]Deleted session #{session_id}.[/green]")
+
+    elif cmd == "instagram":
         saved_u, saved_p = _load_saved_credentials(service="instagram")
         username = args.username or os.environ.get("IG_USERNAME") or saved_u
         password = args.password or os.environ.get("IG_PASSWORD") or saved_p
@@ -1555,7 +1642,8 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                 t.add_row(str(r["id"]), r["url"], r["started_at"][:19], str(r["track_count"]))
         else:
             extra_label = {"radio": "Station", "mixcloud": "Uploader",
-                           "youtube": "Uploader", "podbean": "Podcast"}[args.type]
+                           "youtube": "Uploader", "podbean": "Podcast",
+                           "reddit": "Subreddit"}[args.type]
             t.add_column("ID", style="dim", width=5)
             t.add_column("Title", min_width=32)
             t.add_column(extra_label, min_width=18)
@@ -1640,7 +1728,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         def _pos_str(pos) -> str:
             if pos is None:
                 return "—"
-            return f"#{pos}" if session_type == "instagram" else _fmt_time(pos)
+            return f"#{pos}" if session_type in ("instagram", "reddit") else _fmt_time(pos)
 
         if args.misses:
             all_rows = tracks_for_session(args.session_id)

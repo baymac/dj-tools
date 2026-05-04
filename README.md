@@ -31,8 +31,9 @@ dj
 │   ├── mixcloud <url>                [--username] [--password] [--interval N] [--capture N]
 │   ├── youtube <url>                 [--interval N] [--capture N] [--output] [--json]
 │   ├── podbean <url>                 [--interval N] [--capture N] [--output] [--json]
+│   ├── reddit <url>
 │   ├── history                       [-n N]
-│   ├── sessions <type>               [-n N]   types: youtube mixcloud radio instagram podbean
+│   ├── sessions <type>               [-n N]   types: youtube mixcloud radio instagram podbean reddit
 │   ├── instagram-history             [--tracks] [-n N]
 │   ├── radio-history                 [-n N]
 │   ├── mixcloud-history              [-n N]
@@ -41,6 +42,8 @@ dj
 │   ├── youtube-delete-session <id>   [--force]
 │   ├── podbean-history               [-n N]
 │   ├── podbean-delete-session <id>   [--force]
+│   ├── reddit-history                [-n N]
+│   ├── reddit-delete-session <id>    [--force]
 │   ├── login-instagram               [--username] [--password]
 │   ├── login-mixcloud                [--username] [--password]
 │   ├── enrich                        [--dry-run] [--limit N] [--verbose] [--threshold F] [--retry-misses]
@@ -121,10 +124,13 @@ uv run dj_cli.py detect radio-garden <url> --duration 120   # run for 2 hours
 uv run dj_cli.py detect mixcloud https://www.mixcloud.com/djname/mixname/
 uv run dj_cli.py detect youtube https://www.youtube.com/watch?v=XXXX
 uv run dj_cli.py detect podbean https://www.podbean.com/ew/pb-XXXX
+uv run dj_cli.py detect reddit https://www.reddit.com/r/HypeTracks/comments/XXXXX/post_title/
 ```
 
 Instagram credentials come from `IG_USERNAME` / `IG_PASSWORD` in `.env` or via `detect login-instagram`.
 Mixcloud credentials come from `MC_USERNAME` / `MC_PASSWORD` or via `detect login-mixcloud`.
+
+Reddit requires no credentials — the public JSON API is used. Works on any subreddit text post whose body contains lines like `Artist - Title` or `1. Artist - Title (Mix) [Label]`. Labels in `[brackets]` and markdown links are stripped automatically.
 
 ### History and sessions
 
@@ -149,6 +155,8 @@ uv run dj_cli.py detect mixcloud-delete-session <id>
 uv run dj_cli.py detect mixcloud-delete-session <id> --force
 uv run dj_cli.py detect youtube-delete-session <id>
 uv run dj_cli.py detect podbean-delete-session <id>
+uv run dj_cli.py detect reddit-history
+uv run dj_cli.py detect reddit-delete-session <id>
 ```
 
 ### Enrichment
