@@ -64,7 +64,7 @@ def _title_score(a: str, b: str, bp_artist: str = "") -> float:
 
 def _artist_score(a: str, b: str) -> float:
     def tokens(s: str) -> set[str]:
-        return {_normalise(p) for p in re.split(r"[,&/]+", s) if _normalise(p)}
+        return {_normalise(p) for p in re.split(r"[,;&/]+", s) if _normalise(p)}
 
     ta, tb = tokens(a), tokens(b)
     if not ta or not tb:

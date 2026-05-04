@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -201,7 +202,8 @@ def run_enrich(
 
             progress.update(task, description=f"{artist} — {title}")
 
-            query = f"{artist} {search_query(title)}"
+            artist_query = re.sub(r"\s*[\(\[].*?[\)\]]", "", artist).strip()
+            query = f"{artist_query} {search_query(title)}"
             try:
                 results = beatport.search_tracks(query, per_page=10, debug=verbose)
             except bp_api.AuthExpiredError as e:
@@ -237,7 +239,7 @@ def run_enrich(
                 # Retry with base title when a remix/edit/mix tag caused the mismatch
                 base_title = strip_remix(title)
                 if base_title:
-                    base_query = f"{artist} {search_query(base_title)}"
+                    base_query = f"{artist_query} {search_query(base_title)}"
                     try:
                         base_results = beatport.search_tracks(base_query, per_page=10, debug=verbose)
                     except bp_api.AuthExpiredError:
