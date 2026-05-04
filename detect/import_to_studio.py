@@ -48,7 +48,7 @@ from rich.progress import (
 
 from connections import beatport as bp_api
 from detect import db as detect_db
-from detect.enrich import _get_token as _get_beatport_token
+from detect.enrich import _get_token as _get_beatport_token, _try_refresh as _try_refresh_beatport
 
 console = Console()
 
@@ -622,9 +622,29 @@ def run_import_to_studio(
         return
 
     # Beatport client — used for per-track catalog metadata (label, ISRC, mix_name, etc.)
+    # Beatport access tokens last ~10 minutes. A 100-track run takes ~40 minutes,
+    # so the token will expire mid-run. on_401 refreshes via the session cookie
+    # and updates the live client's Authorization header — no expiry interruptions.
     bp_token = _get_beatport_token()
     bp_http = bp_api.make_client(bp_token)
-    beatport = bp_api.Beatport(client=bp_http)
+
+    def _bp_on_401() -> None:
+        nonlocal bp_token
+        new_token = _try_refresh_beatport()
+        if new_token:
+            bp_token = new_token
+            bp_http.headers["authorization"] = bp_token
+            bp_api.save_token_to_env(bp_token)
+            console.log("[dim]Beatport token refreshed mid-run.[/dim]")
+        else:
+            # Don't raise — Beatport metadata is non-critical (each get_track call
+            # is wrapped in try/except). Log and continue without refresh.
+            console.log("[yellow]Beatport session refresh failed; metadata for "
+                        "remaining tracks may be missing. Run "
+                        "[cyan]dj login-beatport --ui[/cyan] then re-run with "
+                        "[cyan]--force[/cyan] to backfill.[/yellow]")
+
+    beatport = bp_api.Beatport(client=bp_http, on_401=_bp_on_401)
 
     counts = {"seen": 0, "ok": 0, "fail": 0, "retried": 0}
     failed_rows: list[dict] = []  # (row, last_error) for end-of-run retry pass

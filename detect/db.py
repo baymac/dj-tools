@@ -160,8 +160,6 @@ def migrate() -> None:
             ("sub_genre",           "TEXT"),
             ("length_ms",           "INTEGER"),
             ("analysis_json",       "TEXT"),
-            # Forward-looking — populated later by a rekordbox-PSSI reader.
-            ("rekordbox_pssi_json", "TEXT"),
             # Rekordbox enrichment (added by import-rekordbox-analysis):
             ("rk_analysis_json",      "TEXT"),  # phrases (PSSI) + memory cues + hot cues + mood
             # Per-source completion timestamps. NULL = not done; ISO8601 = done.
