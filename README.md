@@ -109,9 +109,11 @@ dj
 │   ├── sync-beatport                                  Stage 4: Beatport library → enriched_tracks
 │   │                                                  [--dry-run] [--limit N] [--verbose]
 │   ├── import-to-studio                               Stage 5a: drive DJ Studio analysis headlessly
-│   │                                                  [--limit N] [--keep-temp] [--verbose] [--force]
+│   │                                                  [--limit N] [--verbose] [--force]
+│   ├── repair-studio-library                          Maintenance: drop half-baked DJ Studio library entries
+│   │                                                  [--dry-run] [--include-orphans]
 │   ├── enrich-studio                                  Stage 5b: read DJ Studio library files
-│   │                                                  [--dry-run] [--limit N] [--verbose]
+│   │                                                  [--dry-run] [--limit N] [--verbose] [--force]
 │   ├── export-to-rekordbox                            Stage 6a: push to rekordbox playlist
 │   │                                                  [--playlist NAME] [--limit N] [--dry-run] [--force]
 │   ├── import-rekordbox-analysis                      Stage 6b: ingest rekordbox PSSI + cues
@@ -308,13 +310,37 @@ uv run dj_cli.py detect import-to-studio --verbose
 - `--limit N`: stop after N tracks (0 = no limit).
 - `--force`: re-process tracks even if they're already in DJ Studio's library.
 
-**Idempotent:** skip rule is "library_key already exists in DJ Studio's `audio-library-table`". DJ Studio's filesystem is the single source of truth for "this track is imported" — we no longer track this in our DB.
+**Idempotent:** skip rule is "library_key exists in DJ Studio's `audio-library-table` AND has `mikKey` set". DJ Studio's filesystem is the single source of truth for "this track is imported" — we no longer track this in our DB.
+
+**Crash-safe writes:** the audio-library-table file (with `mikKey`) is the skip indicator and is written LAST, after track-structures + 4 compressedAudioView binaries. Ctrl-C between writes leaves the audio-library-table file absent → the next run reprocesses cleanly. No half-baked tracks marked done.
+
+**JWT auto-refresh mid-run:** DJ Studio's access JWT lasts ~60 min. On the first 401 from `cf.dj.studio` the run re-decrypts `encryptedToken-v2.dat`, re-exchanges via `app-services.dj.studio`, pushes the fresh token down to the running Node helper (`setAccessJwt` command — no helper restart, no model reload), and retries the failed track. Long batches don't need babysitting. If the post-refresh retry also 401s, the run aborts with a clear message — that means `encryptedToken-v2.dat` itself is invalid (open DJ Studio, sign in, quit, re-run).
 
 **Failure handling:** transient `cf.dj.studio` failures are auto-retried inside the Node helper (4 attempts, exponential backoff up to 9s). Tracks that still fail get a second pass at the end of the batch after a 5s pause. The summary distinguishes "written / recovered on retry / permanently failed" with per-track error reasons.
 
 **Per-track timing:** ~30-50s per track on first run (SDK + model cold-start), ~25-30s steady-state. ~2GB peak memory (Demucs models). 100 tracks ≈ 50-60 minutes.
 
 When you reopen DJ Studio after running, those tracks appear in your library fully analysed — same as if you'd added them to a mix and let DJ Studio process them.
+
+### repair-studio-library — clean up half-baked DJ Studio library entries
+
+Maintenance helper for `import-to-studio`. Finds entries in DJ Studio's `audio-library-table` with `mikKey` set but missing companion files (track-structures or any of the 4 compressedAudioView binaries), and deletes the audio-library-table file so the next `import-to-studio` reprocesses them with the full pipeline.
+
+Most "half-baked" entries come from DJ Studio's own UI flows (Beatport browser preview, dragging into a mix without playing), not from our tool — DJ Studio writes a light analysis (mikKey + camelotKey + beatGrids) without computing stems. `import-to-studio`'s pipeline produces the strictly fuller analysis with stems.
+
+```bash
+uv run dj_cli.py detect repair-studio-library --dry-run             # report only
+uv run dj_cli.py detect repair-studio-library                       # delete recoverable
+uv run dj_cli.py detect repair-studio-library --include-orphans     # delete free orphans too
+```
+
+Three classifications, only the safe ones are deleted by default:
+
+| Classification | What it is | Default action |
+|---|---|---|
+| **recoverable** | beatport_id is in `enriched_tracks` | deleted; next `import-to-studio` requeues it |
+| **orphan, free** | not in `enriched_tracks`, not used by any saved mix | skipped (use `--include-orphans` to delete; data loss — no recovery path through this tool) |
+| **orphan, in-use** | not in `enriched_tracks`, but referenced by a mix in `projects-table` | NEVER deleted (would leave a broken slot in your saved mix), even with `--include-orphans` |
 
 ### enrich-studio — read DJ Studio's library into enriched_tracks_analysis
 

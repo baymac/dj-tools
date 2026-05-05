@@ -471,6 +471,11 @@ rl.on('line', async (line) => {
       } catch (e) {
         emit('error', { beatport_id: msg.beatport_id, message: e.message });
       }
+    } else if (msg.cmd === 'setAccessJwt') {
+      // Mid-run JWT refresh — Python decrypts a fresh token and pushes it down.
+      // Subsequent analyze calls pick it up automatically.
+      djsAccessJwt = msg.djsAccessJwt || '';
+      emit('jwtUpdated');
     } else if (msg.cmd === 'exit') {
       try { if (bpClient) await bpClient.release(); } catch {}
       emit('exit');

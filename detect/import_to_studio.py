@@ -83,6 +83,144 @@ MIK_CAMELOT_STR_TO_INT = {v: k for k, v in MIK_CAMELOT_INT_TO_STR.items()}
 KIND = "beatport-sdk"
 
 
+def _companion_file_paths(library_key: str) -> dict[str, Path]:
+    """Where each per-track artifact lives in DJ Studio's filesystem."""
+    shard = _shard(library_key)
+    return {
+        "structures": DJ_STUDIO_STRUCTURES / shard / library_key,
+        "vocals":     DJ_STUDIO_VOCALS / shard / library_key,
+        "drums":      DJ_STUDIO_DRUMS / shard / library_key,
+        "bass":       DJ_STUDIO_BASS / shard / library_key,
+        "melody":     DJ_STUDIO_MELODY / shard / library_key,
+    }
+
+
+def find_half_baked_library_entries() -> list[tuple[str, Path, list[str]]]:
+    """Return library entries that have mikKey set but are missing companion
+    files (track-structures or any of the 4 compressedAudioView*).
+
+    Each tuple: (library_key, audio_library_table_path, [missing_artifact_names]).
+    """
+    half_baked: list[tuple[str, Path, list[str]]] = []
+    if not DJ_STUDIO_LIBRARY.is_dir():
+        return half_baked
+    for shard in DJ_STUDIO_LIBRARY.iterdir():
+        if not shard.is_dir():
+            continue
+        for f in shard.iterdir():
+            if not f.is_file():
+                continue
+            try:
+                data = json.loads(f.read_text())
+            except Exception:
+                continue
+            k = data.get("key")
+            if not k:
+                continue
+            if data.get("mikKey") is None and data.get("camelotKey") is None:
+                continue  # no mikKey → already not in skip set, will reprocess
+            companions = _companion_file_paths(k)
+            missing = [name for name, p in companions.items() if not p.is_file()]
+            if missing:
+                half_baked.append((k, f, missing))
+    return half_baked
+
+
+def _library_keys_used_in_mixes() -> set[str]:
+    """Return every libraryKey referenced by any mix in DJ Studio's
+    projects-table. Deleting entries in this set would leave broken slots
+    in your saved mixes."""
+    used: set[str] = set()
+    projects_dir = DJ_STUDIO_DB / "projects-table"
+    if not projects_dir.is_dir():
+        return used
+    for f in projects_dir.iterdir():
+        if not f.is_file():
+            continue
+        try:
+            project = json.loads(f.read_text())
+        except Exception:
+            continue
+        for ref in project.get("mixList") or []:
+            lk = ref.get("libraryKey") if isinstance(ref, dict) else None
+            if lk:
+                used.add(lk)
+    return used
+
+
+def repair_studio_library(*, dry_run: bool = False, include_orphans: bool = False) -> dict:
+    """Find + delete half-baked DJ Studio library entries so import-to-studio
+    can re-process them.
+
+    Three classifications:
+    - recoverable: beatport_id is in `enriched_tracks`. Next import-to-studio
+      will re-queue. Deleted by default.
+    - orphan (free): NOT in enriched_tracks AND NOT referenced by any mix.
+      Deleted only with `include_orphans=True` (no recovery path through this
+      tool, but no in-use mixes affected either).
+    - orphan (in-use): NOT in enriched_tracks BUT referenced by at least one
+      mix in projects-table. NEVER deleted — would leave a broken slot in
+      your saved mix. Reported only.
+    """
+    half_baked = find_half_baked_library_entries()
+    counts = {
+        "scanned": 0, "half_baked": len(half_baked),
+        "recoverable": 0, "orphan_free": 0, "orphan_in_use": 0, "removed": 0,
+    }
+    if not DJ_STUDIO_LIBRARY.is_dir() or not half_baked:
+        return counts
+    counts["scanned"] = sum(
+        1 for shard in DJ_STUDIO_LIBRARY.iterdir() if shard.is_dir()
+        for _ in shard.iterdir()
+    )
+
+    import sqlite3
+    con = sqlite3.connect(detect_db.DB_PATH)
+    enriched_bp_ids: set[int] = {
+        r[0] for r in con.execute(
+            "SELECT DISTINCT beatport_id FROM enriched_tracks WHERE beatport_id IS NOT NULL"
+        )
+    }
+    con.close()
+    in_use_keys = _library_keys_used_in_mixes()
+
+    for library_key, lib_path, missing in half_baked:
+        try:
+            bp = int(library_key.removeprefix(f"{KIND}_"))
+        except ValueError:
+            bp = None
+        recoverable = bp is not None and bp in enriched_bp_ids
+        in_use = library_key in in_use_keys
+
+        if recoverable:
+            tag = "recoverable"
+            counts["recoverable"] += 1
+            should_remove = True
+        elif in_use:
+            tag = "orphan-in-use"
+            counts["orphan_in_use"] += 1
+            should_remove = False  # never auto-delete: would break a saved mix
+        else:
+            tag = "orphan-free"
+            counts["orphan_free"] += 1
+            should_remove = include_orphans
+
+        if not should_remove:
+            reason = "referenced by a saved mix — would break the slot" if in_use else "orphan, no enriched_tracks row"
+            console.print(f"[dim]skip ({tag}, {reason})[/dim]  {library_key}")
+            continue
+        if dry_run:
+            console.print(f"[yellow]would remove ({tag})[/yellow]  {library_key}  missing: {','.join(missing)}")
+        else:
+            try:
+                lib_path.unlink()
+                counts["removed"] += 1
+                console.print(f"[red]removed ({tag})[/red]  {library_key}  missing: {','.join(missing)}")
+            except OSError as e:
+                console.print(f"[red]failed to remove[/red]  {library_key}: {e}")
+    return counts
+
+
 def _existing_library_keys() -> set[str]:
     """Return library_keys for entries that have completed analysis.
 
@@ -586,6 +724,22 @@ class SdkHelper:
         except Exception:
             return {"event": "log", "message": line.rstrip()}
 
+    def set_access_jwt(self, new_jwt: str) -> None:
+        """Push a fresh DJ Studio access JWT down to the running Node helper.
+        Subsequent analyze() calls pick it up automatically — no helper restart
+        needed."""
+        self._jwt = new_jwt
+        self._send({"cmd": "setAccessJwt", "djsAccessJwt": new_jwt})
+        # Drain until ack so we don't race with the next analyze()
+        while True:
+            evt = self._read()
+            if evt is None:
+                return
+            if evt.get("event") == "jwtUpdated":
+                return
+            if evt.get("event") == "log" and self._verbose:
+                console.log(f"[dim]helper:[/dim] {evt.get('message')}")
+
     def analyze(self, beatport_id: int) -> dict:
         """Send analyze + read events until we get the matching analysis or error.
 
@@ -669,6 +823,26 @@ def _run_import_to_studio_impl(
     counts = {"seen": 0, "ok": 0, "fail": 0, "retried": 0}
     failed_rows: list[dict] = []  # (row, last_error) for end-of-run retry pass
 
+    def _is_auth_failure(err: str) -> bool:
+        """cf.dj.studio rejected our JWT — the access token expired (60-min
+        lifetime) or was invalidated. Surfaced by the Node helper as
+        `classifier ok=False status=401 body={"message":"Signature is invalid"}`."""
+        return "status=401" in err or "Signature is invalid" in err
+
+    def _refresh_jwt_and_retry(row, helper, *, attempt_label: str) -> tuple[bool, str]:
+        """Decrypt + re-exchange a fresh DJ Studio access JWT, push it down to
+        the helper, and retry the track once."""
+        nonlocal access_jwt
+        try:
+            access_jwt = _get_dj_studio_access_token()
+        except Exception as e:
+            return False, f"jwt refresh failed: {type(e).__name__}: {e}"
+        helper.set_access_jwt(access_jwt)
+        progress.log(
+            f"[dim]Access JWT refreshed mid-run, retrying bp:{row['beatport_id']}…[/dim]"
+        )
+        return _process_one(row, helper, attempt_label=attempt_label)
+
     progress = Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
         BarColumn(), MofNCompleteColumn(), TaskProgressColumn(), TimeElapsedColumn(),
@@ -694,14 +868,19 @@ def _run_import_to_studio_impl(
 
         library_key = f"{KIND}_{bid}"
         entry = _build_library_entry(beatport_id=bid, artist=artist, title=title, shaped=shaped)
-        _write_library_entry(library_key, entry)
-        _write_track_structures(library_key, shaped)
 
+        # Write companion files first, library entry LAST. The library entry
+        # (with mikKey set) is the skip indicator for `_existing_library_keys`.
+        # If we get Ctrl-C'd between writes, the library entry won't be on disk
+        # yet → next run reprocesses cleanly. Reverse order leaves half-baked
+        # tracks marked "done" with missing stem data.
+        _write_track_structures(library_key, shaped)
         stems_b64 = shaped["stems_compressed_b64"] or {}
         _write_compressed_view(DJ_STUDIO_VOCALS, library_key, stems_b64.get("vocals"))
         _write_compressed_view(DJ_STUDIO_DRUMS,  library_key, stems_b64.get("drums"))
         _write_compressed_view(DJ_STUDIO_BASS,   library_key, stems_b64.get("bass"))
         _write_compressed_view(DJ_STUDIO_MELODY, library_key, stems_b64.get("other"))
+        _write_library_entry(library_key, entry)  # commit point — written last
 
         if verbose:
             t = res["result"].get("timing_ms", {})
@@ -727,6 +906,17 @@ def _run_import_to_studio_impl(
             progress.update(task, advance=1, description=f"{artist} — {title}")
 
             ok, err = _process_one(row, helper)
+            if not ok and _is_auth_failure(err):
+                ok, err = _refresh_jwt_and_retry(row, helper, attempt_label=" [post-refresh]")
+                if not ok and _is_auth_failure(err):
+                    progress.stop()
+                    raise RuntimeError(
+                        f"cf.dj.studio still rejecting our JWT after a fresh refresh. "
+                        f"Wrote {counts['ok']}/{counts['seen']} tracks before the failure.\n\n"
+                        f"This usually means encryptedToken-v2.dat itself is invalid "
+                        f"(server-side session revoked, or the file is stale). Open DJ "
+                        f"Studio, sign back in, quit (Cmd+Q), and re-run."
+                    )
             if ok:
                 counts["ok"] += 1
             else:
@@ -747,6 +937,15 @@ def _run_import_to_studio_impl(
                 progress.update(retry_task, advance=1,
                                 description=f"{row['artist']} — {row['title']} (retry)")
                 ok, err = _process_one(row, helper, attempt_label=" [retry]")
+                if not ok and _is_auth_failure(err):
+                    ok, err = _refresh_jwt_and_retry(row, helper, attempt_label=" [retry post-refresh]")
+                    if not ok and _is_auth_failure(err):
+                        progress.stop()
+                        raise RuntimeError(
+                            f"cf.dj.studio still rejecting our JWT after a fresh refresh during retry pass. "
+                            f"Wrote {counts['ok']}/{counts['seen']} tracks before the failure.\n\n"
+                            f"Open DJ Studio, sign back in, quit (Cmd+Q), and re-run."
+                        )
                 if ok:
                     counts["ok"] += 1
                     counts["retried"] += 1

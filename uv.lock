@@ -303,7 +303,7 @@ wheels = [
 ]
 
 [[package]]
-name = "dj-chicago"
+name = "dj-tools"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
