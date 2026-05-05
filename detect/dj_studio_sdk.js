@@ -371,6 +371,13 @@ async function analyzeTrack(beatportId, accessJwt) {
     ? toMono(audio.channelArrays)
     : resample(toMono(audio.channelArrays), audio.sampleRate, TARGET_SR);
   const durationSec = mono.length / TARGET_SR;
+  // Surface audio dimensions up-front so partial-output diagnostics later in
+  // this run can be correlated with track length / source quality. Tracks
+  // under ~30s typically can't produce reliable beats or stems.
+  logMsg(`bp:${beatportId} audio: ${durationSec.toFixed(1)}s  src_sr=${audio.sampleRate}  ch=${audio.channels}  mono_samples=${mono.length}`);
+  if (durationSec < 30) {
+    logMsg(`bp:${beatportId} short audio (${durationSec.toFixed(1)}s) — beatgrid/stems may return empty`);
+  }
 
   // 1. MIK WASM
   const tMikStart = Date.now();
