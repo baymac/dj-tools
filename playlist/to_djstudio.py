@@ -80,6 +80,13 @@ def push_to_djstudio(
 
     library_keys = _audio_library_keys()
 
+    project_uuid = str(uuid4())
+    now_iso = (
+        datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
     track_refs: list[dict] = []
     bpms: list[float] = []
     genres: dict[str, int] = {}
@@ -92,8 +99,12 @@ def push_to_djstudio(
         if lib_key not in library_keys:
             missing.append(int(bid))
             continue
+        # mixList[].key format must be `{project_uuid}/{slot_uuid}` — that's
+        # how DJ Studio's loader correlates a project's track slot with its
+        # mix-time settings (autoEffects, repitchSettings, automations).
+        slot_uuid = str(uuid4())
         track_refs.append({
-            "key": str(uuid4()),
+            "key": f"{project_uuid}/{slot_uuid}",
             "libraryKey": lib_key,
         })
         bpm = row.get("tempo_precise") or row.get("bpm")
@@ -127,25 +138,81 @@ def push_to_djstudio(
         console.print("[red]Nothing to write — all tracks missing from DJ Studio's library.[/red]")
         return
 
-    project_uuid = str(uuid4())
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     main_genre = max(genres.items(), key=lambda kv: kv[1])[0] if genres else ""
-    min_bpm = min(bpms) if bpms else 0.0
-    max_bpm = max(bpms) if bpms else 0.0
+    min_bpm = min(bpms) if bpms else 120.0
+    max_bpm = max(bpms) if bpms else 120.0
     total_duration = sum(durations) if durations else len(track_refs) * 240
 
+    # Full DJ Studio project schema. Empty/default values for fields we don't
+    # populate are still required — DJ Studio's loader validates the schema
+    # and silently drops projects with missing keys. Reverse-engineered from
+    # an "Untitled" mix DJ Studio created itself.
     project = {
         "key": project_uuid,
+        "metaKey": str(uuid4()),
         "name": mix_name,
+        "artist": "",
+        "description": "",
+        "image": {"type": ""},
         "genre": main_genre,
+        "channelCount": 2,
         "duration": total_duration,
         "trackCount": len(track_refs),
         "minBpm": min_bpm,
         "maxBpm": max_bpm,
+        "minBpmLine": -1,
+        "maxBpmLine": -1,
+        "mixBpmStart": -1,
+        "mixBpmEnd": -1,
+        "mixBpmManualMode": False,
+        "mixBpmFixedMode": False,
+        "trackOffset": 0,
         "createdAt": now_iso,
         "lastModified": now_iso,
+        "recordingDate": now_iso,
         "mixList": track_refs,
+        "jingleList": [],
         "autoEffects": [],
+        "automations": [],
+        "trackEffects": [],
+        "repitchSettings": [],
+        "controlDefaults": [],
+        "masterEffects": [],
+        "vstListEffects": [],
+        "vstListMaster": [],
+        "multiEffectList": [],
+        "recordingTrackList": [],
+        "videoSettingsLookup": [],
+        "videoSettingsRecords": [],
+        "editorSettings": {
+            "usesVocalLane": False,
+            "sampleLaneAmount": 2,
+            "voiceOverSidechainEnabled": True,
+            "voiceOverDuckingAmount": 0.5,
+            "voiceOverChannelGain": 0,
+            "lastVocalChannelIx": -1,
+            "hasSampleLanes": True,
+        },
+        "globalVideoSettings": {"globalText": ""},
+        "mixingType": 0,
+        "version": 0,
+        "isDraft": False,
+        "isTemplate": False,
+        "isTemporary": False,
+        "isMashup": False,
+        "isCanvasMode": False,
+        "locked": False,
+        "saveCompleted": True,
+        "mode": "mp3",
+        "recordOutputGain": 0,
+        "recordOutputType": 0,
+        "recordingLength": 0,
+        "recordingMimeType": "audio/mp3",
+        "recordingFileExtension": "mp3",
+        "recordingComplete": False,
+        "shareId": "",
+        "usesOldEffects": False,
+        "useLegacyBpmPointBehavior": False,
     }
 
     project_path = _PROJECTS_DIR / project_uuid
