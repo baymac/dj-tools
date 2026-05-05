@@ -18,6 +18,7 @@ Flow per track:
 """
 from __future__ import annotations
 
+import bisect
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -197,14 +198,37 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
             "name": "",
         })
 
+    beats = result.get("beatgrid", {}).get("beats", [])
+
+    # cf.dj.studio's EnergyLevelSegments returns time-bounded segments only —
+    # StartBeat / BeatLength are missing from the response. DJ Studio's UI
+    # post-processes by aligning each segment's [startTime, endTime) to the
+    # beatgrid (counting beats whose time falls inside). We do the same so
+    # the analysis blob has segment-as-beats info for queries that work in
+    # beat-space rather than seconds.
+    _beat_times = [b.get("time", 0) for b in beats]
+    def _beat_ix_at(t: float) -> int:
+        return bisect.bisect_left(_beat_times, t)
+
     energy_level_segments = []
     for i, seg in enumerate(body.get("EnergyLevelSegments") or []):
+        start_t = seg.get("StartTime", 0)
+        end_t = seg.get("EndTime", 0)
+        # Server may already supply StartBeat/BeatLength on some tracks; use
+        # those when present, fall back to time→beatgrid alignment.
+        start_beat = seg.get("StartBeat")
+        beat_length = seg.get("BeatLength")
+        if not start_beat:
+            start_beat = _beat_ix_at(start_t) if _beat_times else 0
+        if not beat_length:
+            end_beat = _beat_ix_at(end_t) if _beat_times else 0
+            beat_length = max(0, end_beat - start_beat)
         energy_level_segments.append({
             "nr": i,
-            "startBeatNr": seg.get("StartBeat", 0),
-            "beatLength": seg.get("BeatLength", 0),
-            "startTime": seg.get("StartTime", 0),
-            "endTime": seg.get("EndTime", 0),
+            "startBeatNr": start_beat,
+            "beatLength": beat_length,
+            "startTime": start_t,
+            "endTime": end_t,
             "type": 100,
             "mood": 100,
             "mikEnergy": seg.get("EnergyLevel", 0),
@@ -212,8 +236,6 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
             "label": str(seg.get("EnergyLevel", "")),
             "comment": "from mixed in key",
         })
-
-    beats = result.get("beatgrid", {}).get("beats", [])
 
     # Phrase numbering: 8-bar (32-beat) groups anchored to first downbeat.
     # DJ Studio's own track-structures phraseData stays empty (the renderer
