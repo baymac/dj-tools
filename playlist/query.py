@@ -1,6 +1,6 @@
 """Run user SQL against the enriched tables, return full row dicts.
 
-Push code (`playlist.to_rekordbox`, `playlist.to_djstudio`) needs columns the
+Push code (`playlist.to_beatport`, `playlist.to_rekordbox`) needs columns the
 user's query may not have selected (artist/title/genre/key/bpm/length_ms). After
 extracting beatport_ids from the user's query, we re-fetch full rows from
 `enriched_tracks` LEFT JOIN `enriched_tracks_analysis` so destinations always

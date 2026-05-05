@@ -68,7 +68,7 @@ def command_logger(
     Sets `console.record = True` for the duration; at exit, dumps `export_text`
     to logs/<command>/<date>_<run_id>.log. Use as:
 
-        with command_logger("import-to-studio", console) as log_path:
+        with command_logger("studio-analyse", console) as log_path:
             console.print(f"[dim]Log: {log_path}[/dim]")
             ...  # whatever the command does
 

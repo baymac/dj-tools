@@ -1,7 +1,7 @@
 """Idempotent push: Stage 6a of the enrichment pipeline.
 
 Reads tracks from enriched_tracks_analysis where rekordbox_export_at IS NULL
-(i.e., already through Stage 5b enrich-studio but not yet pushed) and sends
+(i.e., already through Stage 5 studio-analyse but not yet pushed) and sends
 them to a rekordbox playlist via `playlist.to_rekordbox`. Marks each track's
 rekordbox_export_at on success so re-runs only pick up new rows.
 
@@ -43,8 +43,8 @@ def _export_to_rekordbox_impl(
         rows = rows[:limit]
     if not rows:
         console.print(
-            "Nothing to export — every Stage-5b row already has rekordbox_export_at set,\n"
-            "or no tracks have been through enrich-studio yet.\n"
+            "Nothing to export — every analysed row already has rekordbox_export_at set,\n"
+            "or no tracks have been through studio-analyse yet.\n"
             "[dim]Use --force to re-push all tracks.[/dim]"
         )
         return

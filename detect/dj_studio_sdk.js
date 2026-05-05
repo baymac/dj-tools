@@ -371,6 +371,13 @@ async function analyzeTrack(beatportId, accessJwt) {
     ? toMono(audio.channelArrays)
     : resample(toMono(audio.channelArrays), audio.sampleRate, TARGET_SR);
   const durationSec = mono.length / TARGET_SR;
+  // Surface audio dimensions up-front so partial-output diagnostics later in
+  // this run can be correlated with track length / source quality. Tracks
+  // under ~30s typically can't produce reliable beats or stems.
+  logMsg(`bp:${beatportId} audio: ${durationSec.toFixed(1)}s  src_sr=${audio.sampleRate}  ch=${audio.channels}  mono_samples=${mono.length}`);
+  if (durationSec < 30) {
+    logMsg(`bp:${beatportId} short audio (${durationSec.toFixed(1)}s) — beatgrid/stems may return empty`);
+  }
 
   // 1. MIK WASM
   const tMikStart = Date.now();
@@ -386,6 +393,9 @@ async function analyzeTrack(beatportId, accessJwt) {
   const tBgStart = Date.now();
   const beatgrid = await runBeatgrid(mono);
   const tBg = Date.now() - tBgStart;
+  if (!beatgrid.beats || beatgrid.beats.length === 0) {
+    logMsg(`bp:${beatportId} ai-beatgrid returned 0 beats (key=${beatgrid.detected_key || 'none'}) — track will be flagged as incomplete on Python side`);
+  }
 
   // 4. ai-beatgrid phrases (best-effort)
   const tPhStart = Date.now();
@@ -396,6 +406,10 @@ async function analyzeTrack(beatportId, accessJwt) {
   const tStStart = Date.now();
   const stems = await runStems(mono);
   const tSt = Date.now() - tStStart;
+  const emptyStems = ['vocals', 'drums', 'bass', 'other'].filter(k => !stems.stems?.[k]);
+  if (emptyStems.length) {
+    logMsg(`bp:${beatportId} ai-stems returned empty for: ${emptyStems.join(',')} — track will be flagged as incomplete on Python side`);
+  }
 
   // 6. compressed views + per-stem RMS metrics
   const compressed = {
@@ -436,6 +450,18 @@ async function analyzeTrack(beatportId, accessJwt) {
       bass:   compressed.bass.compressed_b64,
       other:  compressed.other.compressed_b64,
     },
+    // Per-bucket RMS for each stem (uint16 LE, base64). 1024-sample buckets at
+    // 44.1k = ~23ms per bucket, ~43 buckets/sec. Python downsamples + slices
+    // into per-second curves and per-energy-segment averages for analysis_json.
+    // Same precision as DJ Studio's compressed view (uint16 / 65535 = float).
+    stems_rms_per_bucket_b64: {
+      vocals: compressed.vocals.rms_per_bucket_b64,
+      drums:  compressed.drums.rms_per_bucket_b64,
+      bass:   compressed.bass.rms_per_bucket_b64,
+      other:  compressed.other.rms_per_bucket_b64,
+    },
+    stems_bucket_samples: BUCKET_SAMPLES,
+    stems_target_sr: TARGET_SR,
     stem_metrics,
     stems_process_time_ms: stems.process_time_ms,
   };
