@@ -813,15 +813,18 @@ def run_import_to_studio(
     limit: int = 0,
     verbose: bool = False,
     force: bool = False,
+    retry_failed: bool = False,
 ) -> None:
     from paths import command_logger
     with command_logger("import-to-studio", console) as log_path, caffeinate():
         console.print(f"[dim]Log: {log_path}[/dim]")
-        _run_import_to_studio_impl(limit=limit, verbose=verbose, force=force)
+        _run_import_to_studio_impl(
+            limit=limit, verbose=verbose, force=force, retry_failed=retry_failed,
+        )
 
 
 def _run_import_to_studio_impl(
-    *, limit: int, verbose: bool, force: bool,
+    *, limit: int, verbose: bool, force: bool, retry_failed: bool,
 ) -> None:
     if is_dj_studio_running():
         console.print(
@@ -836,7 +839,9 @@ def _run_import_to_studio_impl(
     candidates = detect_db.get_import_to_studio_pending(force=force)
 
     library_keys = _existing_library_keys()
-    failures = _load_failures()
+    failures = {} if retry_failed else _load_failures()
+    if retry_failed:
+        console.print("[dim]--retry-failed: ignoring hard-failure sidecar this run[/dim]")
 
     # Filter chain. force=True ignores all skip rules.
     skipped_in_library = skipped_short = skipped_too_many_failures = 0

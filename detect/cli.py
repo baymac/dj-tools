@@ -1120,6 +1120,8 @@ Examples:
     its_p.add_argument("--verbose", "-v", action="store_true")
     its_p.add_argument("--force", action="store_true",
                        help="Re-process tracks even if dj_studio_at is already set (default: skip done)")
+    its_p.add_argument("--retry-failed", action="store_true",
+                       help="Ignore the hard-failure sidecar and re-attempt tracks that previously hit MAX_FAILURE_ATTEMPTS")
 
     # repair-studio-library
     rsl_p = sub.add_parser(
@@ -1691,6 +1693,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             limit=args.limit,
             verbose=args.verbose,
             force=args.force,
+            retry_failed=args.retry_failed,
         )
 
     elif cmd == "repair-studio-library":
