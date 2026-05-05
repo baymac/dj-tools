@@ -688,12 +688,16 @@ def get_studio_analyse_pending(*, force: bool = False) -> list[sqlite3.Row]:
     filters client-side: tracks already in enriched_tracks_analysis are skipped
     unless `force=True`.
 
-    Returns `length_ms` so the caller can pre-filter very short tracks (under
-    ~30s) which can't produce reliable beats or stems anyway.
+    Returns `length_ms` and `release_date` so the caller can:
+    - pre-filter very short tracks (under ~30s) which can't produce reliable
+      beats or stems anyway
+    - skip pre-release tracks gracefully when the SDK rejects audio fetch
+      (Beatport withholds audio until the release date)
     """
     with _connect() as con:
         return con.execute(
-            """SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm, e.length_ms
+            """SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm,
+                      e.length_ms, e.release_date
                 FROM enriched_tracks e
                 WHERE e.beatport_id IS NOT NULL
                 ORDER BY e.id"""

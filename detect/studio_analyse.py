@@ -160,11 +160,23 @@ def _run_studio_analyse_impl(
         )
         return
 
-    counts = {"seen": 0, "ok": 0, "fail": 0, "retried": 0}
+    counts = {"seen": 0, "ok": 0, "fail": 0, "retried": 0, "pre_release_skipped": 0}
     failed_rows: list[dict] = []
+
+    import datetime as _dt
+    _today_iso = _dt.date.today().isoformat()
 
     def _is_auth_failure(err: str) -> bool:
         return "status=401" in err or "Signature is invalid" in err
+
+    def _is_audio_unavailable(err: str) -> bool:
+        # Beatport SDK signal when audio fetch is refused — typically delisted,
+        # region-locked, or pre-release.
+        return "Unable to get audio information" in err
+
+    def _is_pre_release(row) -> bool:
+        rd = row.get("release_date") or ""
+        return len(rd) >= 10 and rd[:10] > _today_iso
 
     def _refresh_jwt_and_retry(row, helper, *, attempt_label: str) -> tuple[bool, str]:
         nonlocal access_jwt
@@ -240,6 +252,15 @@ def _run_studio_analyse_impl(
             if ok:
                 counts["ok"] += 1
                 _clear_failure(failures, row["beatport_id"])
+            elif _is_audio_unavailable(err) and _is_pre_release(row):
+                # Pre-release: Beatport withholds audio until release_date. Skip
+                # without bumping the failure counter so the next run after the
+                # release date will retry naturally.
+                counts["pre_release_skipped"] += 1
+                progress.log(
+                    f"[dim]bp:{row['beatport_id']} skip — pre-release "
+                    f"({row['release_date']}, drops in the future)[/dim]"
+                )
             else:
                 failed_rows.append({"row": row, "error": err})
                 if verbose:
@@ -285,6 +306,8 @@ def _run_studio_analyse_impl(
     summary = f"{counts['ok']}/{counts['seen']} written"
     if counts["retried"]:
         summary += f"  ([green]{counts['retried']} recovered on retry[/green])"
+    if counts["pre_release_skipped"]:
+        summary += f"  ([dim]{counts['pre_release_skipped']} pre-release skipped[/dim])"
     if counts["fail"]:
         summary += f"  ([red]{counts['fail']} failed[/red])"
     console.print(f"[bold]Done.[/bold] {summary}")

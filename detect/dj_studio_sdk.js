@@ -322,7 +322,9 @@ async function runStems(monoSamples) {
 // metrics without re-decoding the binary.
 const BUCKET_SAMPLES = 1024;
 function compressStemToView(stemSamples) {
-  if (!stemSamples) return { compressed_b64: null, avg_rms: null, peak_rms: null, rms_per_bucket: null };
+  // Demucs may return null for a stem when ai-stems fails or audio is too short.
+  // Match the success-path key names so consumers don't need to special-case this.
+  if (!stemSamples) return { compressed_b64: null, avg_rms: null, peak_rms: null, rms_per_bucket_b64: null };
   const n = Math.floor(stemSamples.length / BUCKET_SAMPLES);
   const out = Buffer.alloc(2 + n * 8);
   out.writeUInt16LE(0xFFFF, 0);
