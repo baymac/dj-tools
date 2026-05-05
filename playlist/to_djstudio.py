@@ -19,6 +19,7 @@ from rich.console import Console
 _DEFAULT_CONSOLE = Console()
 
 _PROJECTS_DIR = Path.home() / "Music" / "DJ.Studio" / "Database" / "projects-table"
+_PROJECTS_META_DIR = Path.home() / "Music" / "DJ.Studio" / "Database" / "projects-meta-table"
 _LIBRARY_DIR = Path.home() / "Music" / "DJ.Studio" / "Database" / "audio-library-table"
 
 
@@ -215,18 +216,58 @@ def push_to_djstudio(
         "useLegacyBpmPointBehavior": False,
     }
 
+    # DJ Studio's UI reads `projects-meta-table` (the index of mixes shown in
+    # the sidebar), NOT `projects-table` (which holds the actual mix data).
+    # Without a meta entry, the project file exists on disk but never appears.
+    last_modified_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+    project_meta = {
+        "key": project_uuid,
+        "name": mix_name,
+        "artist": "",
+        "genre": main_genre,
+        "description": "",
+        "shareTitle": "",
+        "isShareTemplate": False,
+        "projectSubType": "",
+        "readonly": False,
+        "isReview": False,
+        "lastAudioExportFilePath": "",
+        "lastVideoExportFilePath": "",
+        "shareId": "",
+        "sourceMixId": "",
+        "versions": [
+            {"key": project_uuid, "name": mix_name, "lastModified": last_modified_ms}
+        ],
+        "isDeleted": False,
+        "mode": "mp3",
+        "lastModified": now_iso,
+        "duration": total_duration,
+        "trackCount": len(track_refs),
+        "isMashup": False,
+        "isCanvasMode": False,
+        "customCoverImageUrl": "",
+        "thumbnailLibraryKeys": [r["libraryKey"] for r in track_refs[:4]],
+        "folderKey": "",
+    }
+
     project_path = _PROJECTS_DIR / project_uuid
+    meta_path = _PROJECTS_META_DIR / project_uuid
 
     console.print(
         f"[bold]playlist → DJ Studio[/bold] ← {len(track_refs)} tracks  →  [yellow]{mix_name}[/yellow]"
     )
-    console.print(f"  uuid: {project_uuid}")
-    console.print(f"  path: {project_path}")
-    console.print(f"  bpm:  {min_bpm:.1f} – {max_bpm:.1f}   genre: {main_genre or '-'}")
+    console.print(f"  uuid:      {project_uuid}")
+    console.print(f"  data:      {project_path}")
+    console.print(f"  meta:      {meta_path}")
+    console.print(f"  bpm:       {min_bpm:.1f} – {max_bpm:.1f}   genre: {main_genre or '-'}")
 
     if dry_run:
         console.print("[dim]DRY RUN — not writing.[/dim]")
         return
 
+    if not _PROJECTS_META_DIR.is_dir():
+        _PROJECTS_META_DIR.mkdir(parents=True, exist_ok=True)
+
     project_path.write_text(json.dumps(project, indent=2))
-    console.print(f"[green]Done.[/green] Open DJ Studio to see '{mix_name}' in your projects.")
+    meta_path.write_text(json.dumps(project_meta, indent=2))
+    console.print(f"[green]Done.[/green] Quit + reopen DJ Studio to see '{mix_name}' in your mixes list.")
