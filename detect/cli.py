@@ -1121,6 +1121,16 @@ Examples:
     its_p.add_argument("--force", action="store_true",
                        help="Re-process tracks even if dj_studio_at is already set (default: skip done)")
 
+    # repair-studio-library
+    rsl_p = sub.add_parser(
+        "repair-studio-library",
+        help="Find + delete half-baked DJ Studio library entries so import-to-studio re-processes them. Default skips orphans (no enriched_tracks row).",
+    )
+    rsl_p.add_argument("--dry-run", action="store_true",
+                       help="Report half-baked entries without deleting")
+    rsl_p.add_argument("--include-orphans", action="store_true",
+                       help="Also delete orphans (entries with no enriched_tracks row). Destructive — these can't be re-added via import-to-studio.")
+
     # export-to-rekordbox
     etr_p = sub.add_parser(
         "export-to-rekordbox",
@@ -1681,6 +1691,26 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             limit=args.limit,
             verbose=args.verbose,
             force=args.force,
+        )
+
+    elif cmd == "repair-studio-library":
+        from detect.import_to_studio import repair_studio_library
+        counts = repair_studio_library(
+            dry_run=args.dry_run, include_orphans=args.include_orphans,
+        )
+        orphan_free_note = (
+            "  [dim](skipped — pass --include-orphans to delete)[/dim]"
+            if counts["orphan_free"] and not args.include_orphans else ""
+        )
+        console.print()
+        console.print(
+            f"[bold]Repair {'(dry run) ' if args.dry_run else ''}complete[/bold]\n"
+            f"  Library entries scanned:    {counts['scanned']}\n"
+            f"  Half-baked found:           {counts['half_baked']}\n"
+            f"    recoverable (in enriched_tracks):                        {counts['recoverable']}\n"
+            f"    orphan & free (no mix references):                       {counts['orphan_free']}{orphan_free_note}\n"
+            f"    orphan & in use by saved mixes (NEVER deleted):          {counts['orphan_in_use']}\n"
+            f"  Removed: {counts['removed']}"
         )
 
     elif cmd == "export-to-rekordbox":
