@@ -386,6 +386,9 @@ async function analyzeTrack(beatportId, accessJwt) {
   const tBgStart = Date.now();
   const beatgrid = await runBeatgrid(mono);
   const tBg = Date.now() - tBgStart;
+  if (!beatgrid.beats || beatgrid.beats.length === 0) {
+    logMsg(`bp:${beatportId} ai-beatgrid returned 0 beats (key=${beatgrid.detected_key || 'none'}) — track will be flagged as incomplete on Python side`);
+  }
 
   // 4. ai-beatgrid phrases (best-effort)
   const tPhStart = Date.now();
@@ -396,6 +399,10 @@ async function analyzeTrack(beatportId, accessJwt) {
   const tStStart = Date.now();
   const stems = await runStems(mono);
   const tSt = Date.now() - tStStart;
+  const emptyStems = ['vocals', 'drums', 'bass', 'other'].filter(k => !stems.stems?.[k]);
+  if (emptyStems.length) {
+    logMsg(`bp:${beatportId} ai-stems returned empty for: ${emptyStems.join(',')} — track will be flagged as incomplete on Python side`);
+  }
 
   // 6. compressed views + per-stem RMS metrics
   const compressed = {
