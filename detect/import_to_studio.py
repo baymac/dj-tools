@@ -866,6 +866,23 @@ def _run_import_to_studio_impl(
             srv = (res.get("result") or {}).get("server") or {}
             return False, f"classifier ok={srv.get('ok')} status={srv.get('status')} body={str(srv.get('body'))[:120]}"
 
+        # Completeness check: only commit when every companion artifact is
+        # present. The classifier sets mikKey/mikEnergy even when ai-beatgrid
+        # gave no beats or ai-stems gave no stems; without this gate we'd
+        # write audio-library-table (the skip indicator) for tracks that
+        # then look "half-baked" to find_half_baked_library_entries on the
+        # next scan. Treat partial output as a transient failure so the
+        # retry pass picks it up.
+        stems_b64 = shaped.get("stems_compressed_b64") or {}
+        missing = []
+        if not shaped.get("beat_data") and not shaped.get("energy_level_segments"):
+            missing.append("beats+energy")
+        for stem_name, key in (("vocals", "vocals"), ("drums", "drums"), ("bass", "bass"), ("melody", "other")):
+            if not stems_b64.get(key):
+                missing.append(stem_name)
+        if missing:
+            return False, f"incomplete shaped payload — missing: {','.join(missing)}"
+
         library_key = f"{KIND}_{bid}"
         entry = _build_library_entry(beatport_id=bid, artist=artist, title=title, shaped=shaped)
 
