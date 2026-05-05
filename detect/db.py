@@ -131,13 +131,13 @@ def migrate() -> None:
         # Lean linking-table keyed on beatport_id. All Beatport-derived fields
         # (artist/title/bpm/key/genre/mix_name/label/...) live on `enriched_tracks`
         # and are joined in at query time.
-        # A row exists in this table only after `dj detect enrich-studio` has
-        # populated it (Stage 5b). `dj detect import-to-studio` writes only to
-        # DJ Studio's local library files — not to our DB.
+        # A row exists in this table only after `dj detect studio-analyse` has
+        # populated it (Stage 5). The SDK driver writes directly here — DJ
+        # Studio's filesystem is never touched.
         con.execute("""
             CREATE TABLE IF NOT EXISTS enriched_tracks_analysis (
                 beatport_id           INTEGER PRIMARY KEY,
-                -- DJ Studio (read by enrich-studio from DJ Studio's library files)
+                -- DJ Studio (from SDK output via studio-analyse)
                 mik_key               TEXT,
                 mik_nrg               REAL,
                 vocals                TEXT,
@@ -683,24 +683,10 @@ def insert_beatport_track(
 ANALYSIS_TABLE = "enriched_tracks_analysis"
 
 
-def get_studio_enrichable_tracks() -> list[sqlite3.Row]:
-    """All enriched tracks with a beatport_id. The caller (`dj detect enrich-studio`)
-    filters client-side against DJ Studio's audio-library-table — only tracks
-    actually present in DJ Studio's library are processed."""
-    with _connect() as con:
-        return con.execute(
-            """SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm
-                FROM enriched_tracks e
-                WHERE e.beatport_id IS NOT NULL
-                ORDER BY e.id"""
-        ).fetchall()
-
-
-def get_import_to_studio_pending(*, force: bool = False) -> list[sqlite3.Row]:
-    """All enriched tracks with a beatport_id. The caller (`dj detect import-to-studio`)
-    filters client-side: tracks already in DJ Studio's audio-library-table are
-    skipped (those have already been imported and analyzed). `force=True` is
-    advisory — caller can ignore the library check.
+def get_studio_analyse_pending(*, force: bool = False) -> list[sqlite3.Row]:
+    """All enriched tracks with a beatport_id. The caller (`dj detect studio-analyse`)
+    filters client-side: tracks already in enriched_tracks_analysis are skipped
+    unless `force=True`.
 
     Returns `length_ms` so the caller can pre-filter very short tracks (under
     ~30s) which can't produce reliable beats or stems anyway.
@@ -726,13 +712,14 @@ def mark_pipeline_done(beatport_id: int, column: str) -> None:
 
 
 def get_export_to_rekordbox_pending(*, force: bool = False) -> list[sqlite3.Row]:
-    """Tracks already through enrich-studio but not yet pushed to a rekordbox
+    """Tracks already through studio-analyse but not yet pushed to a rekordbox
     playlist. Skip rule: rekordbox_export_at IS NULL on enriched_tracks_analysis."""
     where = "" if force else "WHERE a.rekordbox_export_at IS NULL"
     with _connect() as con:
         return con.execute(
             f"""SELECT a.beatport_id, e.artist, e.title, e.bpm,
                        e.beatport_link, e.key, e.genre, e.length_ms,
+                       e.isrc, e.release_date,
                        a.duration_sec, a.mik_key
                   FROM {ANALYSIS_TABLE} a
                   JOIN enriched_tracks e ON e.beatport_id = a.beatport_id
@@ -768,7 +755,7 @@ def update_rk_analysis_json(beatport_id: int, blob: str) -> None:
 
 def existing_analysis_beatport_ids() -> set[int]:
     """Return the set of beatport_ids that already have a row in
-    enriched_tracks_analysis. Used by `dj detect enrich-studio` to skip
+    enriched_tracks_analysis. Used by `dj detect studio-analyse` to skip
     work that was already done on a previous run."""
     with _connect() as con:
         return {r[0] for r in con.execute(
@@ -789,7 +776,7 @@ _ANALYSIS_COLS = (
 def upsert_analysis(beatport_id: int, fields: dict) -> None:
     """Insert or update one row in enriched_tracks_analysis.
 
-    Called by `dj detect enrich-studio` (the creation point) and any future
+    Called by `dj detect studio-analyse` (the creation point) and any future
     stage that produces analysis data. Only the keys in `_ANALYSIS_COLS` are
     accepted; unknowns are ignored. `dj_studio_at` is stamped to NOW on the
     initial insert.

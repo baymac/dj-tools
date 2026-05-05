@@ -1096,47 +1096,25 @@ Examples:
     sb_p.add_argument("--limit", type=int, default=0, metavar="N",
                       help="Stop after adding N new tracks (0 = no limit)")
 
-    # enrich-studio
-    es_p = sub.add_parser(
-        "enrich-studio",
-        help="Populate mik_key, mik_nrg, vocals, drums, melody from DJ Studio library (phase 2)",
+    # studio-analyse
+    sa_p = sub.add_parser(
+        "studio-analyse",
+        help="Run DJ Studio's SDK analysis and write directly to enriched_tracks_analysis (no DJ Studio filesystem writes).",
     )
-    es_p.add_argument("--dry-run", action="store_true",
-                      help="Show what would be updated without writing to DB")
-    es_p.add_argument("--limit", type=int, default=0, metavar="N",
+    sa_p.add_argument("--ids", default=None, metavar="ID[,ID...]",
+                      help="Comma-separated beatport IDs to analyze. When set, --limit is ignored.")
+    sa_p.add_argument("--limit", type=int, default=0, metavar="N",
                       help="Stop after N tracks (0 = no limit)")
-    es_p.add_argument("--verbose", "-v", action="store_true",
-                      help="Print per-track update details")
-    es_p.add_argument("--force", action="store_true",
-                      help="Re-upsert tracks already in enriched_tracks_analysis (default: skip)")
-
-    # import-to-studio
-    its_p = sub.add_parser(
-        "import-to-studio",
-        help="Drive DJ Studio analysis (key/energy/cuepoints/beatgrid/stems) → DJ Studio's local library files",
-    )
-    its_p.add_argument("--limit", type=int, default=0, metavar="N",
-                       help="Stop after N tracks (0 = no limit)")
-    its_p.add_argument("--verbose", "-v", action="store_true")
-    its_p.add_argument("--force", action="store_true",
-                       help="Re-process tracks even if dj_studio_at is already set (default: skip done)")
-    its_p.add_argument("--retry-failed", action="store_true",
-                       help="Ignore the hard-failure sidecar and re-attempt tracks that previously hit MAX_FAILURE_ATTEMPTS")
-
-    # repair-studio-library
-    rsl_p = sub.add_parser(
-        "repair-studio-library",
-        help="Find + delete half-baked DJ Studio library entries so import-to-studio re-processes them. Default skips orphans (no enriched_tracks row).",
-    )
-    rsl_p.add_argument("--dry-run", action="store_true",
-                       help="Report half-baked entries without deleting")
-    rsl_p.add_argument("--include-orphans", action="store_true",
-                       help="Also delete orphans (entries with no enriched_tracks row). Destructive — these can't be re-added via import-to-studio.")
+    sa_p.add_argument("--verbose", "-v", action="store_true")
+    sa_p.add_argument("--force", action="store_true",
+                      help="Re-process tracks even if a row already exists in enriched_tracks_analysis")
+    sa_p.add_argument("--retry-failed", action="store_true",
+                      help="Ignore the hard-failure sidecar and re-attempt tracks that previously hit MAX_FAILURE_ATTEMPTS")
 
     # export-to-rekordbox
     etr_p = sub.add_parser(
         "export-to-rekordbox",
-        help="Push enrich-studio'd tracks into a rekordbox playlist as Beatport streaming entries (for manual analysis)",
+        help="Push studio-analysed tracks into a rekordbox playlist as Beatport streaming entries (for manual analysis)",
     )
     etr_p.add_argument("--playlist", default="DJ Tools - Enrich",
                        help="Playlist name in rekordbox (created if missing)")
@@ -1682,38 +1660,21 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         from detect.sync_beatport import run_sync_beatport
         run_sync_beatport(dry_run=args.dry_run, verbose=args.verbose, limit=args.limit, playlist=args.playlist)
 
-    elif cmd == "enrich-studio":
-        from detect.enrich_studio import run_enrich_studio
-        run_enrich_studio(dry_run=args.dry_run, limit=args.limit, verbose=args.verbose,
-                          force=args.force)
-
-    elif cmd == "import-to-studio":
-        from detect.import_to_studio import run_import_to_studio
-        run_import_to_studio(
+    elif cmd == "studio-analyse":
+        from detect.studio_analyse import run_studio_analyse
+        ids = None
+        if args.ids:
+            try:
+                ids = [int(x.strip()) for x in args.ids.split(",") if x.strip()]
+            except ValueError:
+                console.print(f"[red]--ids must be comma-separated integers, got: {args.ids}[/red]")
+                return
+        run_studio_analyse(
+            ids=ids,
             limit=args.limit,
             verbose=args.verbose,
             force=args.force,
             retry_failed=args.retry_failed,
-        )
-
-    elif cmd == "repair-studio-library":
-        from detect.import_to_studio import repair_studio_library
-        counts = repair_studio_library(
-            dry_run=args.dry_run, include_orphans=args.include_orphans,
-        )
-        orphan_free_note = (
-            "  [dim](skipped — pass --include-orphans to delete)[/dim]"
-            if counts["orphan_free"] and not args.include_orphans else ""
-        )
-        console.print()
-        console.print(
-            f"[bold]Repair {'(dry run) ' if args.dry_run else ''}complete[/bold]\n"
-            f"  Library entries scanned:    {counts['scanned']}\n"
-            f"  Half-baked found:           {counts['half_baked']}\n"
-            f"    recoverable (in enriched_tracks):                        {counts['recoverable']}\n"
-            f"    orphan & free (no mix references):                       {counts['orphan_free']}{orphan_free_note}\n"
-            f"    orphan & in use by saved mixes (NEVER deleted):          {counts['orphan_in_use']}\n"
-            f"  Removed: {counts['removed']}"
         )
 
     elif cmd == "export-to-rekordbox":

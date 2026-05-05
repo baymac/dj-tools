@@ -450,6 +450,18 @@ async function analyzeTrack(beatportId, accessJwt) {
       bass:   compressed.bass.compressed_b64,
       other:  compressed.other.compressed_b64,
     },
+    // Per-bucket RMS for each stem (uint16 LE, base64). 1024-sample buckets at
+    // 44.1k = ~23ms per bucket, ~43 buckets/sec. Python downsamples + slices
+    // into per-second curves and per-energy-segment averages for analysis_json.
+    // Same precision as DJ Studio's compressed view (uint16 / 65535 = float).
+    stems_rms_per_bucket_b64: {
+      vocals: compressed.vocals.rms_per_bucket_b64,
+      drums:  compressed.drums.rms_per_bucket_b64,
+      bass:   compressed.bass.rms_per_bucket_b64,
+      other:  compressed.other.rms_per_bucket_b64,
+    },
+    stems_bucket_samples: BUCKET_SAMPLES,
+    stems_target_sr: TARGET_SR,
     stem_metrics,
     stems_process_time_ms: stems.process_time_ms,
   };

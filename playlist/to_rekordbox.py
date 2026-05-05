@@ -175,7 +175,28 @@ def push_to_rekordbox(
 
 def _create_beatport_content(db, tables, row, folder_path, device):
     """Bare Beatport streaming entry — NO cueData/hotCuePoints. Rekordbox
-    will compute its own during Analyze Tracks."""
+    will compute its own during Analyze Tracks.
+
+    Field defaults reverse-engineered from rekordbox-native Beatport imports
+    (744 sampled rows). Critical ones for downstream consumers (e.g. DJ
+    Studio's "Add tracks → rekordbox" importer):
+
+    - ExtInfo.AudioQuality / AudioQualityWhenAnalyzed = "1"
+        Marks the track as a high-quality streamable Beatport track. DJ Studio
+        treats "0" as a preview and won't load it.
+    - Analysed = 105
+        rekordbox's "Beatport metadata loaded" sentinel. Our previous default
+        (0) made tracks look freshly added but not yet metadata-synced, which
+        DJ Studio's importer skipped.
+    - ServiceID = 0
+        Required, not nullable in practice — every native Beatport row has it.
+    - Lyricist/ISRC/OrgFolderPath/Reserved1/ModifiedByRBM = ""
+      SamplerTrackInfo/SamplerPlayOffset/LyricStatus = 0
+      SamplerGain = 0.0
+      VideoAssociate = "0"
+        Native imports always have these fields populated with these defaults
+        (never NULL). Some downstream parsers fail on NULL.
+    """
     content_id = str(db.generate_unused_id(tables.DjmdContent))
     content_uuid = str(uuid4())
 
@@ -200,6 +221,11 @@ def _create_beatport_content(db, tables, row, folder_path, device):
     length = int(row.get("duration_sec") or 0)
     title, subtitle = _split_title(row.get("title") or "Unknown")
     today = str(datetime.date.today())
+    isrc = row.get("isrc") or ""
+    release_date = row.get("release_date") or ""
+    release_year = None
+    if release_date and len(release_date) >= 4 and release_date[:4].isdigit():
+        release_year = int(release_date[:4])
 
     content = tables.DjmdContent.create(
         ID=content_id, UUID=content_uuid,
@@ -212,13 +238,18 @@ def _create_beatport_content(db, tables, row, folder_path, device):
         FileSize=0, BitRate=0, BitDepth=16, SampleRate=44100,
         Rating=0, Commnt="", ColorID="0",
         StockDate=today, DateCreated="",
-        Analysed=0,
+        Analysed=105,
         DJPlayCount=0, TrackNo=0, DiscNo=0,
         DeviceID=device.ID, MasterDBID=device.MasterDBID, MasterSongID=content_id,
         AnalysisDataPath=f"/PIONEER/USBANLZ/{content_uuid[:1].lower()}/{content_uuid[1:3].lower()}/{content_uuid}",
         rb_file_id="0",
         HotCueAutoLoad="on", DeliveryControl="on", DeliveryComment="", ContentLink=0,
-        ExtInfo='{"StreamingInfo": {"AudioQuality": "0", "AudioQualityWhenAnalyzed": "0"}}',
+        ExtInfo='{"StreamingInfo": {"AudioQuality": "1", "AudioQualityWhenAnalyzed": "1"}}',
+        ServiceID=0,
+        ISRC=isrc, Lyricist="", OrgFolderPath="", Reserved1="", ModifiedByRBM="",
+        SamplerTrackInfo=0, SamplerPlayOffset=0, SamplerGain=0.0,
+        VideoAssociate="0", LyricStatus=0,
+        ReleaseYear=release_year,
     )
     db.add(content)
     db.flush()

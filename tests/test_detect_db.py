@@ -287,10 +287,10 @@ def test_list_enriched_tracks_playlist_filter(tmp_db):
     assert tech[0]["title"] == "T1"
 
 
-def test_get_studio_enrichable_tracks(tmp_db):
+def test_get_studio_analyse_pending(tmp_db):
     pid = db.upsert_beatport_playlist(1, "PL")
     db.insert_beatport_track("A", "T", "https://bp.com/t/t/10", {"beatport_id": 10}, playlist_id=pid)
-    rows = db.get_studio_enrichable_tracks()
+    rows = db.get_studio_analyse_pending()
     assert len(rows) == 1
     assert rows[0]["artist"] == "A"
     assert rows[0]["beatport_id"] == 10

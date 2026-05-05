@@ -4,7 +4,7 @@ JSON blob into `enriched_tracks_test.rk_analysis_json` (or the production
 table if asked).
 
 Pipeline order:
-  1. `dj detect import-to-studio` → DJ Studio analysis (key/energy/cues/stems)
+  1. `dj detect studio-analyse` → DJ Studio analysis (key/energy/cues/stems)
   2. `dj detect export-to-rekordbox` → push tracks to a rekordbox playlist
   3. *user opens rekordbox, runs Track → Analyze on the playlist*
   4. `dj detect import-rekordbox-analysis` ← THIS COMMAND, reads ANLZ data

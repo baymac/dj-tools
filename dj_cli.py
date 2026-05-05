@@ -41,7 +41,6 @@ Examples:
 
   uv run dj_cli.py playlist beatport --query "SELECT beatport_id FROM enriched_tracks_full WHERE genre='Tech House' AND mik_nrg>=7" --name "Peak Tech House"
   uv run dj_cli.py playlist rekordbox --query "..." --name "..."
-  uv run dj_cli.py playlist dj-studio --query "..." --name "..."
 """,
     )
     sub = parser.add_subparsers(dest="command")

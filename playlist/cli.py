@@ -1,4 +1,9 @@
-"""Argparse CLI for `dj playlist <destination> --query --name`."""
+"""Argparse CLI for `dj playlist <destination> --query --name`.
+
+Destinations: `beatport` and `rekordbox`. The previous `dj-studio` destination
+was removed — DJ Studio's filesystem is not a write target for this tool any
+more (see CLAUDE.md / README.md for the rationale).
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +17,7 @@ console = Console()
 def add_playlist_subparser(parent) -> argparse.ArgumentParser:
     p = parent.add_parser(
         "playlist",
-        help="Push a SQL query of enriched tracks to Beatport / rekordbox / DJ Studio.",
+        help="Push a SQL query of enriched tracks to Beatport or rekordbox.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Example queries (anything that returns beatport_id is valid):\n"
@@ -30,7 +35,6 @@ def add_playlist_subparser(parent) -> argparse.ArgumentParser:
     for dest_name, dest_help in [
         ("beatport", "Create or append to a Beatport playlist."),
         ("rekordbox", "Create or append to a rekordbox playlist."),
-        ("dj-studio", "Write a new DJ Studio mix project file."),
     ]:
         d = sub.add_parser(dest_name, help=dest_help)
         d.add_argument(
@@ -91,8 +95,5 @@ def _dispatch_impl(args, p: argparse.ArgumentParser, cmd: str) -> None:
     elif cmd == "rekordbox":
         from playlist.to_rekordbox import push_to_rekordbox
         push_to_rekordbox(rows, args.name, dry_run=args.dry_run, console=console)
-    elif cmd == "dj-studio":
-        from playlist.to_djstudio import push_to_djstudio
-        push_to_djstudio(rows, args.name, dry_run=args.dry_run, console=console)
     else:
         p.print_help()
