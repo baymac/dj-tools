@@ -506,6 +506,21 @@ uv run dj_cli.py playlist dj-studio \
 
 **Difference from `detect export-to-rekordbox`:** that one is the idempotent Stage 6a that pushes everything in `enriched_tracks_analysis` where `rekordbox_export_at IS NULL` (i.e., already through enrich-studio but not yet pushed) and stamps the timestamp on success. `playlist rekordbox` is ad-hoc curation by SQL — no pipeline-stamp side effects, and it works against any track in `enriched_tracks` whether or not it's been through enrich-studio.
 
+**`playlist dj-studio` writes two files per push:**
+- `~/Music/DJ.Studio/Database/projects-table/<uuid>` — the full mix data (mixList, autoEffects, etc)
+- `~/Music/DJ.Studio/Database/projects-meta-table/<uuid>` — the index entry the sidebar reads
+
+DJ Studio also tracks per-mix UI state in IndexedDB (`~/Library/Application Support/DJ.Studio/IndexedDB/local-web_*.indexeddb.leveldb/`) which we don't write to. The mix appears in DJ Studio's mixes list (the loader rebuilds that list from disk on launch) and tracks load/play correctly, **but UI delete is a no-op for tool-created mixes** — the right-click → Delete flow looks up the IndexedDB row, doesn't find it, and silently fails. To remove a mix our tool created, delete both files manually:
+
+```bash
+KEY=<uuid printed by the playlist dj-studio command>
+rm ~/Music/DJ.Studio/Database/projects-table/$KEY \
+   ~/Music/DJ.Studio/Database/projects-meta-table/$KEY
+# then quit + reopen DJ Studio
+```
+
+Use `playlist dj-studio` for ephemeral inspection mixes (where you're fine deleting via `rm` later); push keepers via DJ Studio's own UI.
+
 ---
 
 ## Environment variables
