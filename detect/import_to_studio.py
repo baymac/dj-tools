@@ -82,6 +82,48 @@ MIK_CAMELOT_STR_TO_INT = {v: k for k, v in MIK_CAMELOT_INT_TO_STR.items()}
 
 KIND = "beatport-sdk"
 
+# Tracks shorter than this are reliably under ai-beatgrid's working window
+# and Demucs needs a few seconds of audio to separate stems — skip them at
+# queue time rather than burn ~30s/track only to commit empty data.
+MIN_DURATION_MS = 30_000
+
+# Persistent record of helper-level failures (helper.analyze returned ok=False
+# OR _shape_result rejected the response). Tracks failing N consecutive times
+# are auto-skipped on subsequent runs to avoid infinite recycle.
+from paths import STATE_DIR  # noqa: E402
+
+FAILURES_FILE = STATE_DIR / "import_to_studio_failures.json"
+MAX_FAILURE_ATTEMPTS = 3
+
+
+def _load_failures() -> dict[int, dict]:
+    if not FAILURES_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(FAILURES_FILE.read_text())
+    except Exception:
+        return {}
+    return {int(k): v for k, v in raw.items() if str(k).isdigit()}
+
+
+def _save_failures(failures: dict[int, dict]) -> None:
+    FAILURES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FAILURES_FILE.write_text(
+        json.dumps({str(k): v for k, v in failures.items()}, indent=2)
+    )
+
+
+def _record_failure(failures: dict[int, dict], beatport_id: int, error: str) -> None:
+    entry = failures.get(beatport_id) or {"attempts": 0}
+    entry["attempts"] = entry.get("attempts", 0) + 1
+    entry["last_error"] = error[:300]
+    entry["last_attempt"] = datetime.now(timezone.utc).isoformat()
+    failures[beatport_id] = entry
+
+
+def _clear_failure(failures: dict[int, dict], beatport_id: int) -> None:
+    failures.pop(beatport_id, None)
+
 
 def _companion_file_paths(library_key: str) -> dict[str, Path]:
     """Where each per-track artifact lives in DJ Studio's filesystem."""
@@ -793,23 +835,44 @@ def _run_import_to_studio_impl(
 
     candidates = detect_db.get_import_to_studio_pending(force=force)
 
-    # Filter out tracks already in DJ Studio's audio-library-table — DJ Studio's
-    # filesystem is the single source of truth for "is this track imported".
     library_keys = _existing_library_keys()
-    if force:
-        rows = list(candidates)
-    else:
-        rows = [r for r in candidates if f"{KIND}_{r['beatport_id']}" not in library_keys]
+    failures = _load_failures()
+
+    # Filter chain. force=True ignores all skip rules.
+    skipped_in_library = skipped_short = skipped_too_many_failures = 0
+    rows: list[dict] = []
+    for r in candidates:
+        bid = r["beatport_id"]
+        if not force:
+            if f"{KIND}_{bid}" in library_keys:
+                skipped_in_library += 1
+                continue
+            length_ms = r["length_ms"] or 0
+            if 0 < length_ms < MIN_DURATION_MS:
+                skipped_short += 1
+                continue
+            entry = failures.get(bid)
+            if entry and entry.get("attempts", 0) >= MAX_FAILURE_ATTEMPTS:
+                skipped_too_many_failures += 1
+                continue
+        rows.append(dict(r))
 
     if limit:
         rows = rows[:limit]
     if not rows:
         console.print(
-            "Nothing to import — every enriched track is already in DJ Studio's library.\n"
-            "[dim]Use --force to re-process all tracks.[/dim]"
+            "Nothing to import — every enriched track is already in DJ Studio's library "
+            "(or below the duration / failure-attempt thresholds).\n"
+            "[dim]Use --force to re-process all tracks; "
+            "delete ~/Music/dj-tools/state/import_to_studio_failures.json to retry hard-failed tracks.[/dim]"
         )
         return
-    console.print(f"{len(rows)} tracks queued{' [yellow](forced re-run)[/yellow]' if force else ''}.")
+    console.print(
+        f"{len(rows)} tracks queued{' [yellow](forced re-run)[/yellow]' if force else ''}.  "
+        f"[dim]skipped: {skipped_in_library} already in library, "
+        f"{skipped_short} short (<30s), "
+        f"{skipped_too_many_failures} hard-failed ≥{MAX_FAILURE_ATTEMPTS}× before[/dim]"
+    )
 
     try:
         access_jwt = _get_dj_studio_access_token()
@@ -866,22 +929,20 @@ def _run_import_to_studio_impl(
             srv = (res.get("result") or {}).get("server") or {}
             return False, f"classifier ok={srv.get('ok')} status={srv.get('status')} body={str(srv.get('body'))[:120]}"
 
-        # Completeness check: only commit when every companion artifact is
-        # present. The classifier sets mikKey/mikEnergy even when ai-beatgrid
-        # gave no beats or ai-stems gave no stems; without this gate we'd
-        # write audio-library-table (the skip indicator) for tracks that
-        # then look "half-baked" to find_half_baked_library_entries on the
-        # next scan. Treat partial output as a transient failure so the
-        # retry pass picks it up.
+        # Save whatever we got. The classifier's mikKey + mikEnergy already
+        # passed validation in _shape_result; that's enough to commit. We log
+        # which subsystems came back empty (for repair-studio-library to
+        # surface later), but don't refuse to write — partial data still has
+        # value, and the alternative is recycling the track forever.
         stems_b64 = shaped.get("stems_compressed_b64") or {}
-        missing = []
+        partials = []
         if not shaped.get("beat_data") and not shaped.get("energy_level_segments"):
-            missing.append("beats+energy")
+            partials.append("beats+energy")
         for stem_name, key in (("vocals", "vocals"), ("drums", "drums"), ("bass", "bass"), ("melody", "other")):
             if not stems_b64.get(key):
-                missing.append(stem_name)
-        if missing:
-            return False, f"incomplete shaped payload — missing: {','.join(missing)}"
+                partials.append(stem_name)
+        if partials and verbose:
+            progress.log(f"[yellow]bp:{bid} partial — missing {','.join(partials)} (saved anyway)[/yellow]")
 
         library_key = f"{KIND}_{bid}"
         entry = _build_library_entry(beatport_id=bid, artist=artist, title=title, shaped=shaped)
@@ -936,6 +997,7 @@ def _run_import_to_studio_impl(
                     )
             if ok:
                 counts["ok"] += 1
+                _clear_failure(failures, row["beatport_id"])
             else:
                 failed_rows.append({"row": row, "error": err})
                 if verbose:
@@ -966,12 +1028,21 @@ def _run_import_to_studio_impl(
                 if ok:
                     counts["ok"] += 1
                     counts["retried"] += 1
+                    _clear_failure(failures, row["beatport_id"])
                 else:
                     counts["fail"] += 1
                     still_failed.append({"row": row, "error": err})
+                    _record_failure(failures, row["beatport_id"], err)
                     if verbose:
                         progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {err[:160]}")
             failed_rows = still_failed
+
+    # Persist the failure sidecar so the next run can auto-skip tracks that
+    # have hit MAX_FAILURE_ATTEMPTS.
+    try:
+        _save_failures(failures)
+    except Exception as e:
+        console.print(f"[yellow]Could not persist failure sidecar:[/yellow] {e}")
 
     console.print()
     summary = f"{counts['ok']}/{counts['seen']} written"
@@ -981,9 +1052,10 @@ def _run_import_to_studio_impl(
         summary += f"  ([red]{counts['fail']} failed[/red])"
     console.print(f"[bold]Done.[/bold] {summary}")
     if failed_rows:
-        console.print("[red]Permanently failed tracks:[/red]")
+        console.print("[red]Permanently failed tracks (this run):[/red]")
         for fr in failed_rows:
             r = fr["row"]
-            console.print(f"  bp:{r['beatport_id']} — {r['artist']} — {r['title']}: {fr['error'][:200]}")
+            attempts = failures.get(r["beatport_id"], {}).get("attempts", 1)
+            console.print(f"  bp:{r['beatport_id']} (attempt {attempts}/{MAX_FAILURE_ATTEMPTS}) — {r['artist']} — {r['title']}: {fr['error'][:160]}")
     if counts["ok"]:
         console.print("[dim]Next:[/dim] [cyan]uv run dj_cli.py detect enrich-studio[/cyan]")

@@ -700,10 +700,14 @@ def get_import_to_studio_pending(*, force: bool = False) -> list[sqlite3.Row]:
     """All enriched tracks with a beatport_id. The caller (`dj detect import-to-studio`)
     filters client-side: tracks already in DJ Studio's audio-library-table are
     skipped (those have already been imported and analyzed). `force=True` is
-    advisory — caller can ignore the library check."""
+    advisory — caller can ignore the library check.
+
+    Returns `length_ms` so the caller can pre-filter very short tracks (under
+    ~30s) which can't produce reliable beats or stems anyway.
+    """
     with _connect() as con:
         return con.execute(
-            """SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm
+            """SELECT e.id, e.beatport_id, e.artist, e.title, e.bpm, e.length_ms
                 FROM enriched_tracks e
                 WHERE e.beatport_id IS NOT NULL
                 ORDER BY e.id"""
