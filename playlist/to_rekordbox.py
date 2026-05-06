@@ -14,7 +14,6 @@ import datetime
 from typing import Callable, Optional, Sequence
 from uuid import uuid4
 
-import psutil
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -26,19 +25,9 @@ from rich.progress import (
 )
 
 from rekordbox.backup import backup_db
+from rekordbox.utils import is_rekordbox_running
 
 _DEFAULT_CONSOLE = Console()
-
-
-def is_rekordbox_running() -> bool:
-    for proc in psutil.process_iter(["name"]):
-        try:
-            n = (proc.info.get("name") or "").lower()
-            if n == "rekordbox" or n.startswith("rekordbox "):
-                return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return False
 
 
 def _split_title(title: str) -> tuple[str, str]:
@@ -239,6 +228,12 @@ def _create_beatport_content(db, tables, row, folder_path, device):
         Rating=0, Commnt="", ColorID="0",
         StockDate=today, DateCreated="",
         Analysed=105,
+        # AnalysisUpdated/TrackInfoUpdated track rekordbox's metadata-sync version
+        # number per row. DJ Studio's "Add tracks → rekordbox" importer skips
+        # tracks where TrackInfoUpdated < 2 — interprets the row as "not yet
+        # ready for display". Native imports + already-fixed tool entries sit
+        # at "2" minimum. Set both to "2" so the row displays in DJ Studio.
+        AnalysisUpdated="2", TrackInfoUpdated="2",
         DJPlayCount=0, TrackNo=0, DiscNo=0,
         DeviceID=device.ID, MasterDBID=device.MasterDBID, MasterSongID=content_id,
         AnalysisDataPath=f"/PIONEER/USBANLZ/{content_uuid[:1].lower()}/{content_uuid[1:3].lower()}/{content_uuid}",
@@ -249,7 +244,7 @@ def _create_beatport_content(db, tables, row, folder_path, device):
         ISRC=isrc, Lyricist="", OrgFolderPath="", Reserved1="", ModifiedByRBM="",
         SamplerTrackInfo=0, SamplerPlayOffset=0, SamplerGain=0.0,
         VideoAssociate="0", LyricStatus=0,
-        ReleaseYear=release_year,
+        ReleaseYear=release_year, ReleaseDate=release_date or None,
     )
     db.add(content)
     db.flush()

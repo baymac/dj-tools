@@ -66,12 +66,16 @@ function logMsg(msg) { emit('log', { message: String(msg) }); }
 // ── 1. Beatport SDK ───────────────────────────────────────────────────────────
 
 let bpClient = null;
+let lastBpState = null;  // remember most recent state from onStateChanged
 
 async function initSdk(stagingApi = false) {
   const { BeatportClient } = require(SDK_NODE);
   bpClient = BeatportClient;
   bpClient.initializeLog('/tmp/dj_studio_sdk.log', 1, 1000, true, true);
-  bpClient.onStateChanged(state => logMsg(`bp-state ${state}`));
+  bpClient.onStateChanged(state => {
+    lastBpState = state;
+    logMsg(`bp-state ${state}`);
+  });
   const okInit = await bpClient.init(BP_SDK_CALLBACK, BP_SDK_CACHE, !!stagingApi);
   if (!okInit) throw new Error('BeatportClient.init returned false');
   const loginRes = await bpClient.login();
@@ -80,17 +84,47 @@ async function initSdk(stagingApi = false) {
   }
 }
 
+// Capture every property of an SDK error so Python can classify auth-vs-real.
+function describeError(e) {
+  const props = {};
+  if (!e) return props;
+  for (const k of Object.getOwnPropertyNames(e)) {
+    if (k === 'stack') continue;
+    try { props[k] = String(e[k]).slice(0, 300); } catch { /* ignore */ }
+  }
+  return props;
+}
+
 async function fetchFullTrackAudio(beatportId) {
-  const info = await bpClient.getTrackAudioInformation(beatportId);
+  let info;
+  try {
+    info = await bpClient.getTrackAudioInformation(beatportId);
+  } catch (e) {
+    // Re-throw with bpState + error props attached so the caller (and Python)
+    // can distinguish auth/credential errors from real catalog unavailability.
+    const wrap = new Error(e?.message || 'getTrackAudioInformation failed');
+    wrap.bpState = lastBpState;
+    wrap.errorProps = describeError(e);
+    wrap.phase = 'getTrackAudioInformation';
+    throw wrap;
+  }
   const totalSamples = info?.totalSamples;
   const sampleRate   = info?.sampleRate || TARGET_SR;
   const channels     = info?.channels   || 2;
-  if (!totalSamples) throw new Error(`no audio info for track ${beatportId}`);
+  if (!totalSamples) {
+    const wrap = new Error(info?.message || `no audio info for track ${beatportId}`);
+    wrap.bpState = lastBpState;
+    wrap.errorProps = { info_keys: Object.keys(info || {}).join(','), info_message: info?.message, info_status: info?.status };
+    wrap.phase = 'getTrackAudioInformation/empty';
+    throw wrap;
+  }
 
   // getAudioSamples returns [Float32Array left, Float32Array right] (or [mono]).
   const channelArrays = await bpClient.getAudioSamples(beatportId, 0, totalSamples);
   if (!Array.isArray(channelArrays) || !channelArrays[0]) {
-    throw new Error(`getAudioSamples returned no data for ${beatportId}`);
+    const wrap = new Error(`getAudioSamples returned no data for ${beatportId}`);
+    wrap.bpState = lastBpState;
+    throw wrap;
   }
   return { channels, sampleRate, totalSamples, channelArrays };
 }
@@ -497,7 +531,15 @@ rl.on('line', async (line) => {
         const result = await analyzeTrack(msg.beatport_id, djsAccessJwt);
         emit('analysis', { beatport_id: msg.beatport_id, result });
       } catch (e) {
-        emit('error', { beatport_id: msg.beatport_id, message: e.message });
+        // Forward bp_state + raw error props so Python can classify auth vs
+        // real catalog unavailability. fetchFullTrackAudio attaches these.
+        emit('error', {
+          beatport_id: msg.beatport_id,
+          message: e.message,
+          bp_state: e.bpState || lastBpState,
+          error_props: e.errorProps || null,
+          phase: e.phase || null,
+        });
       }
     } else if (msg.cmd === 'setAccessJwt') {
       // Mid-run JWT refresh — Python decrypts a fresh token and pushes it down.
