@@ -510,7 +510,13 @@ class SdkHelper:
             elif kind == "analysis" and evt.get("beatport_id") == beatport_id:
                 return {"ok": True, "result": evt["result"]}
             elif kind == "error" and evt.get("beatport_id") == beatport_id:
-                return {"ok": False, "message": evt.get("message", "unknown")}
+                return {
+                    "ok": False,
+                    "message": evt.get("message", "unknown"),
+                    "bp_state": evt.get("bp_state"),
+                    "error_props": evt.get("error_props"),
+                    "phase": evt.get("phase"),
+                }
             elif kind == "error":
                 console.log(f"[red]helper error:[/red] {evt.get('message')}")
                 return {"ok": False, "message": evt.get("message", "unknown")}
