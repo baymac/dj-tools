@@ -256,6 +256,35 @@ def run_enrich(
                                 f"→  matched as base title '{base_title}'  (score={score:.2f})"
                             )
 
+            # SoundCloud uploaders sometimes use "Title - Artist (Mix)" instead of
+            # the standard "Artist - Title (Mix)" — re-score the same Beatport
+            # results with our artist/title swapped before giving up.
+            if not match:
+                m, s = best_match(artist, title, results, threshold)
+                if m:
+                    match, score = m, s
+                    if verbose:
+                        progress.log(
+                            f"[green]swap fallback:[/green] {artist} — {title}  "
+                            f"→  re-scored with artist/title swapped  (score={score:.2f})"
+                        )
+
+            # Title contains an internal dash (e.g. "Carson Paskill — Jackie Hollander
+            # - You Go I Go (Remix)") → split and try the inner pair as artist/title.
+            if not match:
+                inner = strip_remix(title) or title
+                m_inner = re.split(r"\s+-\s+|-\s+", inner, maxsplit=1)
+                if len(m_inner) == 2 and m_inner[0].strip() and m_inner[1].strip():
+                    inner_artist, inner_title = m_inner[0].strip(), m_inner[1].strip()
+                    m, s = best_match(inner_title, inner_artist, results, threshold)
+                    if m:
+                        match, score = m, s
+                        if verbose:
+                            progress.log(
+                                f"[green]dash-split fallback:[/green] {artist} — {title}  "
+                                f"→  parsed as '{inner_artist}' — '{inner_title}'  (score={score:.2f})"
+                            )
+
             if not match:
                 counts["fuzzy_miss"] += 1
                 best_r = results[0]
