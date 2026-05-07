@@ -556,6 +556,75 @@ uv run helpers/delete_beatport_track.py \
 
 ---
 
+## Course viewer
+
+Download and watch the Pete Tong DJ Academy / Circle course offline.
+All course data lives under `~/Music/dj-tools/course/` (or an SSD — see below).
+
+### Downloader
+
+```bash
+# First-time auth — opens a headed browser; sign in manually; session is saved
+uv run helpers/download_course.py login <course_url>
+
+# Download all lessons (resumes from where it left off)
+uv run helpers/download_course.py download <course_url>
+
+# Flags
+#   --limit N            stop after N lessons (useful for testing)
+#   --dry-run            discover + print lessons without downloading
+#   --lesson-ids ID,...  force re-scrape specific lessons by ID, bypassing cache
+#                        (use after fixing a scraper bug or recovering a failed video)
+```
+
+Output layout under `~/Music/dj-tools/course/`:
+
+```
+lessons.json        full manifest — one entry per lesson
+videos/             downloaded mp4 files
+images/             lesson images
+files/              lesson file attachments
+quizzes/            quiz JSON (one file per quiz lesson)
+thumbs/             video poster frames
+subtitles/          VTT subtitle files
+_keys/              captured AES-128 keys for Dyntube HLS videos
+_hls/               rewritten m3u8 manifests (local key URIs)
+failed.json         lessons that failed during the last run
+```
+
+Logs are written automatically to `~/Music/dj-tools/logs/download-course/YYYY-MM-DD_HHMMSS.log`.
+The run holds a `caffeinate -i` power assertion so the Mac won't sleep mid-download.
+
+### Viewer
+
+```bash
+cd helpers/course_viewer
+npm install          # first time only
+npm run dev          # opens http://localhost:5173 (or next free port)
+```
+
+Vite serves everything directly from `~/Music/dj-tools/course/` as static assets — no
+server, no network requests during playback. Video position and lesson completion state
+are saved to `localStorage`.
+
+### Moving course files to an external SSD
+
+The course directory is ~30 GB. To move it off the boot drive:
+
+```bash
+# 1. Move the files to the SSD (substitute your actual mount point)
+mv ~/Music/dj-tools/course /Volumes/YourSSD/dj-course
+
+# 2. Symlink the original path to the new location
+ln -s /Volumes/YourSSD/dj-course ~/Music/dj-tools/course
+```
+
+The symlink is transparent to Vite, the downloader, and `paths.py` — nothing else needs
+to change. Make sure the SSD is mounted before starting the viewer or running the
+downloader.
+
+---
+
 ## Tests
 
 ```bash
@@ -611,5 +680,7 @@ rekordbox/                      Rekordbox writes via pyrekordbox
   backup.py                     master.db backup
   constants.py                  Path discovery + Camelot/cue-kind constants
 
-helpers/                        Standalone maintenance scripts
+helpers/                        Standalone maintenance scripts + course tools
+  download_course.py            Course downloader (browser scrape + Dyntube/Circle HLS)
+  course_viewer/                Vite + React viewer — serves ~/Music/dj-tools/course/ locally
 ```

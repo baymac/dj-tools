@@ -6,7 +6,7 @@ Videos use TWO platforms — Circle's native HLS player and Dyntube iframes.
 
 Usage:
     uv run helpers/download_course.py login    <course_url>
-    uv run helpers/download_course.py download <course_url> [--limit N] [--dry-run]
+    uv run helpers/download_course.py download <course_url> [--limit N] [--dry-run] [--lesson-ids ID1,ID2,...]
 
 Stages:
   1. Login: opens headed browser, you sign in, session saved to persistent profile
@@ -41,7 +41,20 @@ import httpx
 from playwright.async_api import Response, async_playwright
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from paths import COURSE_DIR, STATE_DIR  # noqa: E402
+from paths import COURSE_DIR, STATE_DIR, open_log  # noqa: E402
+from caffeinate import caffeinate  # noqa: E402
+
+class _Tee:
+    """Write to multiple streams simultaneously (used to mirror stdout to log)."""
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
 
 VIDEOS_DIR = COURSE_DIR / "videos"
 IMAGES_DIR = COURSE_DIR / "images"
@@ -1511,7 +1524,7 @@ async def _refresh_cookies_file(ctx) -> str:
     return tmp.name
 
 
-async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bool = False) -> None:
+async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bool = False, lesson_ids: Optional[set] = None) -> None:
     for d in (VIDEOS_DIR, IMAGES_DIR, FILES_DIR, QUIZZES_DIR, THUMBS_DIR, SUBS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -1583,16 +1596,22 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                     )
                     for s in cached.get("subtitles", []) or []
                 ]
-                # Skip if fully done — already has video file (or doesn't need one)
+                # Skip if fully done — already has video file (or doesn't need one).
+                # --lesson-ids bypasses the skip so targeted lessons are re-scraped.
                 non_video = lesson.type not in (
                     LessonType.VIDEO_CIRCLE.value, LessonType.VIDEO_DYNTUBE.value,
                 )
-                if lesson.extracted and lesson.completed and (non_video or lesson.video_file):
+                force = lesson_ids is not None and lesson.id in lesson_ids
+                if not force and lesson.extracted and lesson.completed and (non_video or lesson.video_file):
                     print(f"  [{i:03d}/{len(lessons)}] {lesson.title[:55]} (cached: {lesson.type})")
                     continue
 
             # Past --limit, just keep cached state — don't process further.
             if i > process_count:
+                continue
+
+            # --lesson-ids: skip anything not in the target set.
+            if lesson_ids is not None and lesson.id not in lesson_ids:
                 continue
 
             print(f"  [{i:03d}/{len(lessons)}] {lesson.title[:55]}", flush=True)
@@ -1694,19 +1713,31 @@ def main() -> None:
     extra = sys.argv[3:]
     limit = None
     dry_run = False
+    lesson_ids = None
     i = 0
     while i < len(extra):
         if extra[i] == "--limit" and i + 1 < len(extra):
             limit = int(extra[i + 1]); i += 2
         elif extra[i] == "--dry-run":
             dry_run = True; i += 1
+        elif extra[i] == "--lesson-ids" and i + 1 < len(extra):
+            lesson_ids = set(extra[i + 1].split(",")); i += 2
         else:
             print(f"Unknown arg: {extra[i]}"); sys.exit(1)
 
     if cmd == "login":
         asyncio.run(cmd_login(url))
     elif cmd == "download":
-        asyncio.run(cmd_download(url, limit=limit, dry_run=dry_run))
+        log_p, log_fh = open_log("download-course")
+        orig_stdout = sys.stdout
+        sys.stdout = _Tee(orig_stdout, log_fh)
+        print(f"Log: {log_p}")
+        try:
+            with caffeinate():
+                asyncio.run(cmd_download(url, limit=limit, dry_run=dry_run, lesson_ids=lesson_ids))
+        finally:
+            sys.stdout = orig_stdout
+            log_fh.close()
     else:
         print(f"Unknown command: {cmd!r}"); sys.exit(1)
 

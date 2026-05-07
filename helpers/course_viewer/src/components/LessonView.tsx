@@ -97,6 +97,9 @@ export function LessonView() {
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8">
+      {lesson.sectionTitle && (
+        <p className="text-xs font-semibold text-gray-400 mb-3">{lesson.sectionTitle}</p>
+      )}
       {lesson.videoFile ? (
         <div className="rounded-xl overflow-hidden bg-black shadow-2xl">
           <video
@@ -147,7 +150,6 @@ export function LessonView() {
       {/* Header */}
       <div className="mt-6 flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs text-gray-500 mb-1">{lesson.sectionTitle}</p>
           <h1 className="text-2xl font-bold text-white">{lesson.title}</h1>
           <a
             href={lesson.url}
