@@ -37,6 +37,8 @@ BROWSER_PROFILE_DIR = STATE_DIR / "browser-profile"
 # Cache
 MUSICKIT_CACHE_DIR = CACHE_DIR / "musickit"
 
+COURSE_DIR = DJ_TOOLS_DIR / "course"
+
 # Exports & backups
 APPLE_MUSIC_EXPORT_CSV = EXPORTS_DIR / "apple_music_export.csv"
 APPLE_MUSIC_BACKUP_DIR = BACKUPS_DIR / "apple-music"
