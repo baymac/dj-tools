@@ -1634,14 +1634,20 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                     prev = lessons[j]
                     res = await _ensure_completed(ctx, prev)
                     print(f"      #{j + 1} {prev.title[:40]}: {res}", flush=True)
-                    if res == "completed":
-                        # Replay forward — re-complete any lessons between j and i-1
-                        # to make sure the chain is solid.
+                    if res in ("completed", "pending"):
+                        # Found the chain anchor — replay forward sequentially.
+                        # "pending" means the button was already clicked (verification
+                        # timed out) — still the right place to stop walking back.
+                        # Stop replaying forward as soon as a lesson is still locked;
+                        # the chain is sequential and each lesson only unlocks after
+                        # the previous one is confirmed on the server.
                         for k in range(j + 1, i - 1):
                             mid = lessons[k]
                             res2 = await _ensure_completed(ctx, mid)
                             print(f"      #{k + 1} {mid.title[:40]}: {res2}", flush=True)
                             walked.append(k)
+                            if res2 == "locked":
+                                break  # chain still blocked here — stop
                         break
                     walked.append(j)
                 # Retry current lesson
