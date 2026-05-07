@@ -1,6 +1,8 @@
 """Tests for detect/soundcloud.py — pure URL + parser helpers (no yt-dlp / network)."""
 from detect.soundcloud import (
+    _filter_useful,
     _format_oauth_track,
+    _is_useful_track,
     clean_url,
     derive_from_url,
     is_set_url,
@@ -129,3 +131,46 @@ def test_format_oauth_track_handles_missing_fields():
     assert out["title"] == "Unknown Title"
     assert out["duration"] == 0
     assert out["source_url"] == ""
+
+
+def test_is_useful_track_keeps_normal_titles():
+    assert _is_useful_track({"artist": "VNSSA", "title": "Let's Have A Kiki"}) is True
+
+
+def test_is_useful_track_drops_unknown_title():
+    assert _is_useful_track({"artist": "Unknown Artist", "title": "Unknown Title"}) is False
+
+
+def test_is_useful_track_drops_empty_title():
+    assert _is_useful_track({"artist": "x", "title": ""}) is False
+    assert _is_useful_track({"artist": "x", "title": "   "}) is False
+
+
+def test_is_useful_track_drops_anonymized_numeric_id():
+    # 10-digit SoundCloud track ID
+    assert _is_useful_track({"artist": "Tracks", "title": "2310936293"}) is False
+
+
+def test_is_useful_track_keeps_short_numeric_titles():
+    # "01", "1999" etc are plausible real titles — only long pure-digit titles are dropped
+    assert _is_useful_track({"artist": "x", "title": "1999"}) is True
+    assert _is_useful_track({"artist": "x", "title": "01"}) is True
+
+
+def test_is_useful_track_keeps_titles_with_digits_and_letters():
+    assert _is_useful_track({"artist": "x", "title": "100% Pure"}) is True
+    assert _is_useful_track({"artist": "x", "title": "2024 Mix"}) is True
+
+
+def test_filter_useful_renumbers_positions():
+    raw = [
+        {"position": 1, "artist": "A", "title": "Real One"},
+        {"position": 2, "artist": "Tracks", "title": "2310936293"},   # dropped
+        {"position": 3, "artist": "B", "title": "Real Two"},
+        {"position": 4, "artist": "Unknown Artist", "title": "Unknown Title"},  # dropped
+        {"position": 5, "artist": "C", "title": "Real Three"},
+    ]
+    kept, dropped = _filter_useful(raw)
+    assert dropped == 2
+    assert [t["position"] for t in kept] == [1, 2, 3]
+    assert [t["title"] for t in kept] == ["Real One", "Real Two", "Real Three"]

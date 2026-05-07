@@ -76,14 +76,16 @@ def derive_from_url(track_url: str) -> tuple[str, str]:
     return artist, title
 
 
-def list_set_tracks(url: str) -> list[dict]:
+def list_set_tracks(url: str) -> tuple[list[dict], int]:
     """Enumerate tracks in a SoundCloud set without downloading audio.
 
     Prefers the SoundCloud OAuth API when SOUNDCLOUD_CLIENT_ID / _SECRET are
     configured (one call, full per-track metadata). Otherwise falls back to
     yt-dlp `--flat-playlist` plus URL-slug derivation (best-effort).
 
-    Returns one dict per track: `{position, artist, title, source_url, duration}`.
+    Filters out tracks whose metadata is too poor to enrich (anonymized
+    SoundCloud track-IDs as titles, fully-fallback "Unknown" stubs) so they
+    don't pollute `detected_tracks`. Returns (kept_tracks, dropped_count).
     """
     try:
         from connections import soundcloud as sc_api
@@ -92,14 +94,41 @@ def list_set_tracks(url: str) -> list[dict]:
             kind = resolved.get("kind")
             if kind in ("playlist", "system-playlist"):
                 api_tracks = sc_api.get_playlist_tracks(resolved["id"])
-                return [_format_oauth_track(t, i) for i, t in enumerate(api_tracks, 1)]
+                raw = [_format_oauth_track(t, i) for i, t in enumerate(api_tracks, 1)]
+                return _filter_useful(raw)
             # Not a playlist — let caller fall through to yt-dlp (rare; e.g. /albums/)
     except sc_api.SoundCloudError as exc:
         # Auth-configured but failing — surface the real error rather than
         # silently dropping to yt-dlp (which would hide a config problem).
         raise RuntimeError(str(exc))
 
-    return _list_set_tracks_via_ytdlp(url)
+    return _filter_useful(_list_set_tracks_via_ytdlp(url))
+
+
+def _is_useful_track(track: dict) -> bool:
+    """True if a track's metadata is good enough for downstream enrichment.
+
+    Drops tracks with empty or fully-fallback (Unknown) titles, and tracks
+    whose title is a long pure-digit string — those are SoundCloud track
+    IDs from anonymized/private uploads where yt-dlp couldn't get a real
+    permalink slug. Letting them through would create dead `detected_tracks`
+    rows that always fail Beatport fuzzy match.
+    """
+    title = (track.get("title") or "").strip()
+    if not title or title == "Unknown Title":
+        return False
+    digits_only = title.replace(" ", "").replace("-", "").replace("_", "")
+    if digits_only.isdigit() and len(digits_only) >= 6:
+        return False
+    return True
+
+
+def _filter_useful(tracks: list[dict]) -> tuple[list[dict], int]:
+    """Drop poor-quality tracks; renumber remaining positions contiguously."""
+    kept = [t for t in tracks if _is_useful_track(t)]
+    for new_pos, t in enumerate(kept, 1):
+        t["position"] = new_pos
+    return kept, len(tracks) - len(kept)
 
 
 def _format_oauth_track(api_track: dict, position: int) -> dict:

@@ -777,12 +777,12 @@ SOUNDCLOUD_SONG_DURATION_S = 15 * 60  # 15 minutes
 
 
 def _run_soundcloud_set(url: str) -> None:
-    """Set URL → enumerate child tracks via yt-dlp metadata, save each one."""
+    """Set URL → enumerate child tracks via metadata, save each one."""
     from .soundcloud import list_set_tracks
 
     with console.status("Enumerating set tracks…"):
         try:
-            tracks = list_set_tracks(url)
+            tracks, dropped = list_set_tracks(url)
         except RuntimeError as exc:
             console.print(f"[red]Error:[/red] {exc}")
             sys.exit(1)
@@ -792,9 +792,12 @@ def _run_soundcloud_set(url: str) -> None:
         sys.exit(0)
 
     set_slug = url.rstrip("/").split("/")[-1].replace("-", " ").title() or "SoundCloud Set"
+    skip_note = (
+        f", [yellow]{dropped}[/yellow] anonymized/empty skipped" if dropped else ""
+    )
     console.print(
         f"[green]✓[/green] Set: [bold]{set_slug}[/bold]  "
-        f"([cyan]{len(tracks)}[/cyan] tracks, no audio download)"
+        f"([cyan]{len(tracks)}[/cyan] tracks{skip_note}, no audio download)"
     )
 
     prior = find_session(url)
