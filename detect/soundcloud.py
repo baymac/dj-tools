@@ -41,6 +41,19 @@ def is_set_url(url: str) -> bool:
     return "/sets/" in urlparse(url).path
 
 
+def is_personalized_url(url: str) -> bool:
+    """True if `url` is a SoundCloud 'Discover'-section personalized playlist.
+
+    Patterns like `/discover/sets/personalized-tracks::<user>:<id>` are
+    session-scoped to the SoundCloud web app and require a logged-in user
+    context that neither client_credentials OAuth nor yt-dlp scrape can provide
+    — both return 404. The cli surfaces a clear error for these URLs and
+    suggests saving the playlist to a regular set first.
+    """
+    path = urlparse(url).path
+    return path.startswith("/discover/") or "personalized-tracks::" in path
+
+
 def parse_artist_title(raw_title: str, fallback_uploader: str = "") -> tuple[str, str]:
     """Split a SoundCloud upload title into (artist, title).
 

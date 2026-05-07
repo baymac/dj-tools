@@ -5,6 +5,7 @@ from detect.soundcloud import (
     _is_useful_track,
     clean_url,
     derive_from_url,
+    is_personalized_url,
     is_set_url,
     parse_artist_title,
 )
@@ -46,6 +47,20 @@ def test_is_set_url_false_for_single_track():
 
 def test_is_set_url_ignores_query_string():
     assert is_set_url("https://soundcloud.com/dj/single-mix?in=abc/sets/foo") is False
+
+
+def test_is_personalized_url_detects_discover_paths():
+    assert is_personalized_url(
+        "https://soundcloud.com/discover/sets/personalized-tracks::jake_fk:2236663730"
+    ) is True
+    assert is_personalized_url("https://soundcloud.com/discover/sets/charts-top:all-music") is True
+
+
+def test_is_personalized_url_false_for_regular_sets():
+    assert is_personalized_url(
+        "https://soundcloud.com/soundcloud-the-peak/sets/level-up-edm-next"
+    ) is False
+    assert is_personalized_url("https://soundcloud.com/dj/single-mix") is False
 
 
 def test_parse_artist_title_with_hyphen():

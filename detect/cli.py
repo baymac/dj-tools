@@ -1721,10 +1721,24 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
     elif cmd == "soundcloud":
         from .soundcloud import (
             clean_url as sc_clean_url,
+            is_personalized_url as sc_is_personalized_url,
             is_set_url as sc_is_set_url,
             resolve_mix as sc_resolve_mix,
         )
         url = sc_clean_url(args.url)
+
+        if sc_is_personalized_url(url):
+            console.print(
+                f"[red]This is a SoundCloud Discover/personalized URL:[/red]\n"
+                f"  [dim]{url}[/dim]\n"
+                f"These are session-scoped to your logged-in SoundCloud web app and aren't "
+                f"accessible via the public API or yt-dlp scrape (both return 404).\n"
+                f"[bold]Workaround:[/bold] open the playlist in SoundCloud → click "
+                f"[bold]Like[/bold] or [bold]Save to playlist[/bold] to copy it into one of "
+                f"your own playlists, then run [bold]dj detect soundcloud[/bold] on that "
+                f"playlist's URL instead."
+            )
+            sys.exit(1)
 
         # Set → enumerate child tracks (no audio scan, no Shazam)
         if sc_is_set_url(url):
