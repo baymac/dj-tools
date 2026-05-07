@@ -96,10 +96,22 @@ def list_set_tracks(url: str) -> tuple[list[dict], int]:
     configured (one call, full per-track metadata). Otherwise falls back to
     yt-dlp `--flat-playlist` plus URL-slug derivation (best-effort).
 
+    Personalized `/discover/` URLs are routed through api-v2 (the only place
+    they're exposed); regular sets use the public api.soundcloud.com.
+
     Filters out tracks whose metadata is too poor to enrich (anonymized
     SoundCloud track-IDs as titles, fully-fallback "Unknown" stubs) so they
     don't pollute `detected_tracks`. Returns (kept_tracks, dropped_count).
     """
+    if is_personalized_url(url):
+        # OAuth tokens are 403'd on api-v2's /discover/ endpoints regardless
+        # of flow. Open a real logged-in browser, intercept the api-v2 XHR.
+        from connections.soundcloud_browser import fetch_personalized_set
+        payload = fetch_personalized_set(url)
+        api_tracks = payload.get("tracks") or []
+        raw = [_format_oauth_track(t, i) for i, t in enumerate(api_tracks, 1)]
+        return _filter_useful(raw)
+
     try:
         from connections import soundcloud as sc_api
         if sc_api.has_credentials():

@@ -1345,6 +1345,14 @@ Examples:
     lm_p.add_argument("--username", "-u", default=None, help="Mixcloud username")
     lm_p.add_argument("--password", "-p", default=None, help="Mixcloud password")
 
+    # login-soundcloud
+    ls_p = sub.add_parser(
+        "login-soundcloud",
+        help="OAuth login (browser) — required for /discover/ personalized URLs",
+    )
+    ls_p.add_argument("--port", type=int, default=8080,
+                      help="Local port for the OAuth callback server (default: 8080)")
+
     # enrich
     enrich_p = sub.add_parser(
         "enrich",
@@ -1719,6 +1727,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                                  resume_session_id=resume_session_id, resume_from=resume_from))
 
     elif cmd == "soundcloud":
+        from connections import soundcloud as sc_api
         from .soundcloud import (
             clean_url as sc_clean_url,
             is_personalized_url as sc_is_personalized_url,
@@ -1727,21 +1736,12 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         )
         url = sc_clean_url(args.url)
 
-        if sc_is_personalized_url(url):
-            console.print(
-                f"[red]This is a SoundCloud Discover/personalized URL:[/red]\n"
-                f"  [dim]{url}[/dim]\n"
-                f"These are session-scoped to your logged-in SoundCloud web app and aren't "
-                f"accessible via the public API or yt-dlp scrape (both return 404).\n"
-                f"[bold]Workaround:[/bold] open the playlist in SoundCloud → click "
-                f"[bold]Like[/bold] or [bold]Save to playlist[/bold] to copy it into one of "
-                f"your own playlists, then run [bold]dj detect soundcloud[/bold] on that "
-                f"playlist's URL instead."
-            )
-            sys.exit(1)
+        # Personalized /discover/ URLs are handled inside _run_soundcloud_set
+        # → list_set_tracks → connections/soundcloud_browser.py (Playwright).
+        # First-run pops a visible browser so the user can log in if needed.
 
         # Set → enumerate child tracks (no audio scan, no Shazam)
-        if sc_is_set_url(url):
+        if sc_is_set_url(url) or sc_is_personalized_url(url):
             _run_soundcloud_set(url)
             return
 
@@ -2121,6 +2121,18 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         password = args.password or os.environ.get("MC_PASSWORD") or getpass.getpass("Mixcloud password: ")
         _save_credentials(username, password, service="mixcloud")
         console.print(f"[green]✓[/green] Mixcloud credentials saved to {CONFIG_FILE}")
+
+    elif cmd == "login-soundcloud":
+        from connections import soundcloud as sc_api
+        try:
+            sc_api.login_user(port=args.port)
+        except sc_api.SoundCloudError as exc:
+            console.print(f"[red]Login failed:[/red] {exc}")
+            sys.exit(1)
+        console.print(
+            "[green]✓[/green] SoundCloud user OAuth complete. "
+            "Personalized /discover/ URLs are now supported."
+        )
 
     elif cmd == "enrich":
         from detect.enrich import run_enrich

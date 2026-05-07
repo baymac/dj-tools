@@ -198,6 +198,7 @@ uv run dj_cli.py detect topdjmixes https://www.topdjmixes.com/some-mix-page/
     - **Set** (`/<user>/sets/<slug>`) → enumerate child tracks via metadata, no audio download.
     - **Single track ≤15 min** → save the track's metadata as one row (no Shazam scan).
     - **Single track >15 min** (radio episodes, DJ mixes) → Shazam-by-chunks audio scan.
+    - **Personalized `/discover/` URLs** (e.g. `personalized-tracks::<user>:<id>`) → require user-bound OAuth (run `dj detect login-soundcloud` once; opens browser, OAuth dance, saves a refresh token). After login the handler auto-uses the user token for all calls; without it `/discover/` URLs return a clear "login required" message. Make sure your SoundCloud app has `http://localhost:8080/callback` (or your custom `SOUNDCLOUD_REDIRECT_URI`) in its Redirect URI list.
 - Reddit: none. Public JSON API. Works on any subreddit text post whose body contains `Artist - Title` lines (markdown links and `[brackets]` are stripped).
 - topdjmixes: none. Paste-into-vi flow (same parser shape as Reddit). Works on any tracklist with `01. Artist – Title` lines — leading position numbers and `[label]` brackets are stripped.
 
