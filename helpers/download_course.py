@@ -559,6 +559,14 @@ async def _extract_lesson(page, lesson: Lesson, signals: dict, video_urls: list[
     elif lesson.type == LessonType.QUIZ.value:
         # Brute-force discover correct answers, save full quiz JSON
         await _extract_quiz(page, lesson)
+        # After solving the quiz Circle may show a "Complete lesson" button that
+        # wasn't present when we first read signals. Re-read now so the
+        # completion click below sees the updated state.
+        try:
+            await page.wait_for_timeout(2000)
+            signals = await page.evaluate(SIGNAL_JS)
+        except Exception:
+            pass
 
     # Attachments — for any type that might have files
     if signals.get("download_links"):
@@ -1355,7 +1363,7 @@ async def _process_lesson(ctx, lesson: Lesson) -> None:
             if data and 8 <= len(data) <= 64 and not key_bytes:
                 key_bytes.append(data)
         except Exception:
-            pass
+            pass  # TargetClosedError etc. — page closed before body was read
 
     def on_response(resp: Response):
         try:
@@ -1381,7 +1389,9 @@ async def _process_lesson(ctx, lesson: Lesson) -> None:
             # Capture AES key bytes — Dyntube serves these via /player-hls-key/
             if "/player-hls-key/" in url or "/hls-key/" in url:
                 t = asyncio.create_task(grab_key_bytes(resp))
-                t.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+                # Swallow the future's exception so it never surfaces as
+                # "Future exception was never retrieved" after page close.
+                t.add_done_callback(lambda f: None)
         except Exception:
             pass
 
@@ -1615,11 +1625,14 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                 continue
 
             print(f"  [{i:03d}/{len(lessons)}] {lesson.title[:55]}", flush=True)
+            # Quiz lessons need longer: brute-forcing N questions × M options
+            # with 3s waits per submit easily exceeds 90s.
+            lesson_timeout = 300 if lesson.type == LessonType.QUIZ.value else 90
             try:
-                await asyncio.wait_for(_process_lesson(ctx, lesson), timeout=90)
+                await asyncio.wait_for(_process_lesson(ctx, lesson), timeout=lesson_timeout)
             except asyncio.TimeoutError:
-                lesson.error = "timeout 90s"
-                print(f"    timeout 90s — moving on")
+                lesson.error = f"timeout {lesson_timeout}s"
+                print(f"    timeout {lesson_timeout}s — moving on")
             except Exception as exc:
                 lesson.error = f"{type(exc).__name__}: {exc}"
                 print(f"    error: {lesson.error}")
