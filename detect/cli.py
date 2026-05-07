@@ -50,6 +50,10 @@ from .db import (
 from . import db as detect_db
 from .parser import has_track_info, parse_tracks
 from .reddit import extract_from_text as reddit_extract_from_text, open_editor_for_post as reddit_open_editor
+from .topdjmixes import (
+    extract_from_text as topdjmixes_extract_from_text,
+    open_editor_for_post as topdjmixes_open_editor,
+)
 from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
 
 load_dotenv()
@@ -1015,6 +1019,20 @@ Examples:
     rd_del_p.add_argument("session_id", type=int)
     rd_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
 
+    # topdjmixes
+    td_p = sub.add_parser("topdjmixes", help="Extract tracks from a topdjmixes.com mix page")
+    td_p.add_argument("url", help="topdjmixes.com mix URL")
+
+    # topdjmixes-history
+    td_hist_p = sub.add_parser("topdjmixes-history", help="Browse topdjmixes mix scans")
+    td_hist_p.add_argument("-n", "--limit", type=int, default=20)
+
+    # topdjmixes-delete-session
+    td_del_p = sub.add_parser("topdjmixes-delete-session",
+                              help="Delete a topdjmixes session and its tracks")
+    td_del_p.add_argument("session_id", type=int)
+    td_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
+
     # history
     hist_p = sub.add_parser("history", help="Show all detected tracks from every source")
     hist_p.add_argument("-n", "--limit", type=int, default=20, help="Number of tracks to show")
@@ -1134,7 +1152,7 @@ Examples:
     ira_p.add_argument("--verbose", "-v", action="store_true")
 
     # sessions
-    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit")
+    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit", "topdjmixes")
     sess_p = sub.add_parser(
         "sessions",
         help="List all sessions for a source type, or detected tracks for one session",
@@ -1256,6 +1274,78 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             sys.exit(1)
         if not args.force:
             console.print(f"[yellow]Delete Reddit session #{session_id} ({len(rows)} track(s))?[/yellow]")
+            if not _confirm("Confirm delete", default=False):
+                sys.exit(0)
+        n = delete_session(session_id)
+        console.print(f"[green]Deleted session #{session_id}.[/green]")
+
+    elif cmd == "topdjmixes":
+        url = args.url
+        prior = find_session(url)
+        if prior:
+            n_tracks = len(tracks_for_session(prior["id"]))
+            console.print(
+                f"\n[dim]This mix was already scanned (session #{prior['id']}, "
+                f"{n_tracks} track(s) found).[/dim]\n"
+            )
+            if not _confirm("Scan again?", default=False):
+                sys.exit(0)
+
+        slug = url.rstrip("/").split("/")[-1] or "topdjmixes"
+        dj_name = slug.replace("-", " ").replace("_", " ").title()
+
+        console.print(
+            f"\n[bold]Paste the topdjmixes.com tracklist into vi, then save and quit (:wq).[/bold]\n"
+            f"[dim]URL: {url}[/dim]\n"
+        )
+        raw_text = topdjmixes_open_editor(url)
+
+        tracks = topdjmixes_extract_from_text(raw_text)
+        if not tracks:
+            console.print("[yellow]No tracks found — nothing saved.[/yellow]")
+            sys.exit(0)
+
+        console.print(f"\n[bold]Found {len(tracks)} track(s) from {dj_name}:[/bold]\n")
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("#",      style="dim", width=4)
+        t.add_column("Artist", min_width=22)
+        t.add_column("Title",  min_width=28)
+        for tr in tracks:
+            t.add_row(str(tr["position"]), tr["artist"], tr["title"])
+        console.print(t)
+
+        session_id = create_session(
+            "topdjmixes", url, dj_name,
+            uploader=dj_name,
+        )
+        insert_tracks(tracks, source="topdjmixes", session_id=session_id)
+        end_session(session_id)
+        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+
+    elif cmd == "topdjmixes-history":
+        sessions = list_sessions("topdjmixes", args.limit)
+        if not sessions:
+            console.print("[dim]No topdjmixes sessions yet.[/dim]")
+            return
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("ID",      style="dim", width=5)
+        t.add_column("Mix",     min_width=40)
+        t.add_column("DJ",      min_width=18)
+        t.add_column("Scanned", style="dim", width=19)
+        t.add_column("Tracks",  style="dim", width=7)
+        for r in sessions:
+            t.add_row(str(r["id"]), r["title"] or "—", r["uploader"] or "—",
+                      r["started_at"][:19], str(r["track_count"]))
+        console.print(t)
+
+    elif cmd == "topdjmixes-delete-session":
+        session_id = args.session_id
+        rows = tracks_for_session(session_id)
+        if not rows:
+            console.print(f"[yellow]Session #{session_id} not found.[/yellow]")
+            sys.exit(1)
+        if not args.force:
+            console.print(f"[yellow]Delete topdjmixes session #{session_id} ({len(rows)} track(s))?[/yellow]")
             if not _confirm("Confirm delete", default=False):
                 sys.exit(0)
         n = delete_session(session_id)
@@ -1744,7 +1834,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         else:
             extra_label = {"radio": "Station", "mixcloud": "Uploader",
                            "youtube": "Uploader", "podbean": "Podcast",
-                           "reddit": "Subreddit"}[args.type]
+                           "reddit": "Subreddit", "topdjmixes": "DJ"}[args.type]
             t.add_column("ID", style="dim", width=5)
             t.add_column("Title", min_width=32)
             t.add_column(extra_label, min_width=18)
