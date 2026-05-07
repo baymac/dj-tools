@@ -188,7 +188,10 @@ def _list_set_tracks_via_ytdlp(url: str) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        info = json.loads(line)
+        try:
+            info = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         raw_title = info.get("title") or info.get("fulltitle") or ""
         uploader = (
             info.get("uploader") or info.get("uploader_id") or info.get("channel") or ""
@@ -284,15 +287,18 @@ def download_mix(url: str, dest_dir: str) -> Path:
 
 def audio_duration(path: str) -> int:
     """Return the duration of an audio file in seconds using ffprobe."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
-            path,
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return 0
     if result.returncode == 0 and result.stdout.strip():
         return int(float(result.stdout.strip()))
     return 0

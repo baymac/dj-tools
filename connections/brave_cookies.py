@@ -56,12 +56,25 @@ def _get_keychain_password() -> str:
     return result.stdout.strip()
 
 
+def _pkcs7_unpad(data: bytes) -> Optional[bytes]:
+    """Remove PKCS#7 padding. Returns None if padding is invalid."""
+    if not data:
+        return None
+    pad = data[-1]
+    if not 1 <= pad <= 16:
+        return None
+    if len(data) < pad:
+        return None
+    return data[:-pad]
+
+
 def _decrypt_value(encrypted: bytes, key: bytes) -> Optional[str]:
     """Decrypt a Chromium cookie blob (`v10`/`v11` + AES-CBC). None on failure.
 
-    Chromium 90+ prepends a 32-byte SHA-256 of the host_key to the plaintext
-    before encryption (integrity check). We strip those 32 bytes after AES
-    decryption, then PKCS#7-unpad to recover the actual cookie value.
+    Chromium 90+ on macOS prepends a 32-byte SHA-256 of the host_key to the
+    plaintext before encryption (integrity check). On newer builds where this
+    prefix was removed, we fall back to treating the full plaintext as the
+    cookie value. Both paths are tried before giving up.
     """
     try:
         from Cryptodome.Cipher import AES
@@ -78,13 +91,22 @@ def _decrypt_value(encrypted: bytes, key: bytes) -> Optional[str]:
     try:
         cipher = AES.new(key, AES.MODE_CBC, _AES_IV)
         plaintext = cipher.decrypt(encrypted)
-        # v10/v11 plaintext starts with sha256(host_key). 32 bytes — skip.
+
         if has_host_prefix and len(plaintext) >= 32:
-            plaintext = plaintext[32:]
-        pad = plaintext[-1]
-        if not 1 <= pad <= 16:
+            # Try stripping the 32-byte sha256(host_key) prefix first.
+            stripped = _pkcs7_unpad(plaintext[32:])
+            if stripped is not None:
+                return stripped.decode("utf-8", errors="replace")
+            # Prefix not present in this Chromium build — try without stripping.
+            fallback = _pkcs7_unpad(plaintext)
+            if fallback is not None:
+                return fallback.decode("utf-8", errors="replace")
             return None
-        return plaintext[:-pad].decode("utf-8", errors="replace")
+
+        result = _pkcs7_unpad(plaintext)
+        if result is None:
+            return None
+        return result.decode("utf-8", errors="replace")
     except Exception:
         return None
 

@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import sys
+import tempfile
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -72,8 +75,24 @@ def _require_credentials() -> tuple[str, str]:
 
 def _save_token_file(path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
-    path.chmod(0o600)
+    # Write to a temp file, chmod to 0o600, then atomically replace the target
+    # so the token is never briefly world-readable under the default umask.
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    try:
+        os.chmod(tmp, 0o600)
+        os.write(fd, json.dumps(payload).encode())
+        os.close(fd)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ── client_credentials cache ──────────────────────────────────────────────────
@@ -118,7 +137,9 @@ def _fetch_new_token() -> str:
     token = body.get("access_token")
     expires_in = body.get("expires_in", 3600)
     if not token:
-        raise SoundCloudError(f"SoundCloud auth response missing access_token: {body}")
+        raise SoundCloudError(
+            f"SoundCloud auth response missing access_token (keys: {list(body.keys())})"
+        )
     _save_token(token, expires_in)
     return token
 
@@ -171,6 +192,11 @@ def _refresh_user_token(refresh_token: str) -> str | None:
         timeout=15,
     )
     if resp.status_code != 200:
+        print(
+            f"SoundCloud token refresh failed: HTTP {resp.status_code} — "
+            f"{resp.text[:200]}. Clearing saved session.",
+            file=sys.stderr,
+        )
         try:
             _USER_TOKEN_FILE.unlink()
         except (OSError, FileNotFoundError):
@@ -209,10 +235,17 @@ def _get_user_access_token() -> str | None:
 class _CallbackHandler(BaseHTTPRequestHandler):
     code: str | None = None
     error: str | None = None
+    expected_state: str | None = None
 
     def do_GET(self):  # noqa: N802 — http.server signature
         params = parse_qs(urlparse(self.path).query)
         if "code" in params:
+            # Verify state to guard against callback injection / CSRF
+            if _CallbackHandler.expected_state:
+                returned_state = params.get("state", [""])[0]
+                if returned_state != _CallbackHandler.expected_state:
+                    self._send(400, "<html><body><h1>Login failed</h1><p>State mismatch — possible CSRF. Try again.</p></body></html>")
+                    return
             _CallbackHandler.code = params["code"][0]
             body = (
                 "<html><body style='font-family: -apple-system, sans-serif; "
@@ -225,7 +258,8 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         else:
             err = params.get("error", ["unknown"])[0]
             _CallbackHandler.error = err
-            self._send(400, f"<html><body><h1>Login failed</h1><p>{err}</p></body></html>")
+            from html import escape as _html_escape
+            self._send(400, f"<html><body><h1>Login failed</h1><p>{_html_escape(err)}</p></body></html>")
 
     def _send(self, status: int, body: str) -> None:
         self.send_response(status)
@@ -256,16 +290,19 @@ def login_user(port: int = 8080) -> dict:
     host = parsed.hostname or "localhost"
     bind_port = parsed.port or port
 
+    state = secrets.token_urlsafe(16)
     auth_url = _AUTHORIZE_URL + "?" + urlencode({
         "client_id": cid,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "non-expiring",
+        "state": state,
     })
 
     # Reset class-level state so repeated logins work
     _CallbackHandler.code = None
     _CallbackHandler.error = None
+    _CallbackHandler.expected_state = state
 
     try:
         server = HTTPServer((host, bind_port), _CallbackHandler)
@@ -275,7 +312,7 @@ def login_user(port: int = 8080) -> dict:
             f"(is something already using it?).\n"
             f"  ({exc})"
         )
-    server.timeout = 300
+    server.timeout = 1  # poll every second so the loop stays responsive
 
     print(f"Opening browser to authorize SoundCloud access…")
     print(f"  Callback URL: {redirect_uri}")
@@ -283,8 +320,15 @@ def login_user(port: int = 8080) -> dict:
     print(f"  (Make sure this exact URL is in your SoundCloud app's Redirect URI list.)")
     webbrowser.open(auth_url)
 
-    # Single-shot — handle one request, then close
-    server.handle_request()
+    # Loop until the code/error arrives.  Browsers prefetch /favicon.ico before
+    # the real callback, which would consume a single handle_request() call and
+    # leave the server without the auth code — so we keep looping until the
+    # handler sets code or error.
+    deadline = time.time() + 300
+    while not (_CallbackHandler.code or _CallbackHandler.error):
+        server.handle_request()
+        if time.time() > deadline:
+            break
     server.server_close()
 
     if _CallbackHandler.error:
@@ -313,7 +357,9 @@ def login_user(port: int = 8080) -> dict:
     access = body.get("access_token")
     refresh = body.get("refresh_token", "")
     if not access:
-        raise SoundCloudError(f"Token exchange response missing access_token: {body}")
+        raise SoundCloudError(
+            f"Token exchange response missing access_token (keys: {list(body.keys())})"
+        )
     return _save_user_tokens(
         access_token=access,
         refresh_token=refresh,
@@ -333,6 +379,30 @@ def _get_token() -> str:
     return cached if cached else _fetch_new_token()
 
 
+def _force_new_token(used_token: str) -> str:
+    """Mint a fresh token after a 401 on `used_token`, preserving auth tier.
+
+    Tries to refresh the user token (preserving the long-lived refresh_token)
+    before falling back to client_credentials. Only drops a cache file if its
+    refresh attempt itself fails — a transient 401 on a stale access_token
+    must not destroy the refresh_token alongside it.
+    """
+    user_data = _load_user_token()
+    if user_data and user_data.get("refresh_token"):
+        # _refresh_user_token unlinks the user file on failure.
+        new_user = _refresh_user_token(user_data["refresh_token"])
+        if new_user and new_user != used_token:
+            return new_user
+
+    # Either no user auth, refresh failed, or refresh returned the same token.
+    # Force a new client_credentials token.
+    try:
+        _CLIENT_TOKEN_FILE.unlink()
+    except (OSError, FileNotFoundError):
+        pass
+    return _fetch_new_token()
+
+
 def _request(path: str, params: dict | None = None) -> Any:
     """Authenticated GET. Auto-retries once on 401 after refreshing token."""
     url = f"{_API_BASE}{path}"
@@ -346,16 +416,10 @@ def _request(path: str, params: dict | None = None) -> Any:
             follow_redirects=True,
         )
 
-    resp = _call(_get_token())
+    token = _get_token()
+    resp = _call(token)
     if resp.status_code == 401:
-        # Drop both caches so the next _get_token() call refreshes whichever
-        # was used. Refresh-then-retry once.
-        for path_ in (_USER_TOKEN_FILE, _CLIENT_TOKEN_FILE):
-            try:
-                path_.unlink()
-            except (OSError, FileNotFoundError):
-                pass
-        resp = _call(_get_token())
+        resp = _call(_force_new_token(token))
 
     if resp.status_code >= 400:
         raise SoundCloudError(
@@ -382,14 +446,10 @@ def _request_v2(path: str, params: dict | None = None) -> Any:
             follow_redirects=True,
         )
 
-    resp = _call(_get_token())
+    token = _get_token()
+    resp = _call(token)
     if resp.status_code == 401:
-        for path_ in (_USER_TOKEN_FILE, _CLIENT_TOKEN_FILE):
-            try:
-                path_.unlink()
-            except (OSError, FileNotFoundError):
-                pass
-        resp = _call(_get_token())
+        resp = _call(_force_new_token(token))
 
     if resp.status_code >= 400:
         raise SoundCloudError(

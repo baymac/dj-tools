@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
@@ -35,6 +36,13 @@ async def _fetch_personalized_async(url: str, headless: bool, timeout_s: int) ->
             "No SoundCloud cookies found in Brave. Open Brave, log in to "
             "soundcloud.com once, then re-run."
         )
+
+    # Derive the target slug from the requested URL so we can correlate XHRs.
+    # For /discover/sets/<slug>, the slug (e.g. "personalized-tracks::user:id")
+    # appears verbatim in the api-v2 system-playlists URL.  This prevents
+    # recommendation-carousel XHRs from being captured as the target playlist.
+    path_segments = [s for s in urlparse(url).path.split("/") if s]
+    target_slug = path_segments[-1] if path_segments else ""
 
     captured: dict[str, Any] = {}
     captured_event = asyncio.Event()
@@ -69,6 +77,11 @@ async def _fetch_personalized_async(url: str, headless: bool, timeout_s: int) ->
                     return
 
                 if is_pl and isinstance(body, dict):
+                    # Require the target slug to appear in the XHR URL so
+                    # recommendation carousels (which use the same endpoint but
+                    # a different URN) don't get mistaken for the target playlist.
+                    if target_slug and target_slug not in url_l:
+                        return
                     tracks = body.get("tracks")
                     if isinstance(tracks, list) and len(tracks) > 0:
                         captured["payload"] = body
