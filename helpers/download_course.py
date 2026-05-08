@@ -1491,32 +1491,37 @@ async def _process_lesson(ctx, lesson: Lesson) -> None:
             # button while it processes the result. Wait up to 20s for it to re-enable
             # before attempting the click.
             if lesson.type == LessonType.QUIZ.value:
-                try:
-                    await page.wait_for_function(
-                        """() => {
-                            for (const b of document.querySelectorAll('button[type="submit"]')) {
-                                if ((b.textContent || '').trim().toLowerCase() === 'complete lesson' && !b.disabled)
-                                    return true;
-                            }
-                            return false;
-                        }""",
-                        timeout=20000,
-                    )
-                except Exception:
-                    pass  # timed out — attempt the click anyway
+                # After passing a quiz, Circle auto-marks the lesson complete on its
+                # backend and leaves the "Complete lesson" button permanently disabled
+                # as a non-interactive indicator. Check if the button is disabled; if
+                # so, treat the lesson as already completed without clicking.
+                quiz_btn_disabled = await page.evaluate("""
+                    () => {
+                        for (const b of document.querySelectorAll('button[type="submit"]')) {
+                            if ((b.textContent || '').trim().toLowerCase() === 'complete lesson')
+                                return b.disabled;
+                        }
+                        return false;
+                    }
+                """)
+                if quiz_btn_disabled:
+                    lesson.completed = True
+                    print(f"    marked complete (quiz auto-completed by platform)")
+                    cb_text = ""  # skip the click below
             try:
-                await page.click(
-                    'button[type="submit"]:has-text("Complete lesson")',
-                    timeout=8000,
-                )
-                # Backend takes 5-10s to persist. We trust the click — Circle's
-                # button text doesn't reliably update on the same page anyway,
-                # so verify-by-reload gives false negatives. If the chain is
-                # actually broken, the next lesson will hit LOCKED and trigger
-                # the walk-back recovery which uses the verified-click helper.
-                await page.wait_for_timeout(8000)
-                lesson.completed = True
-                print(f"    marked complete")
+                if cb_text == "complete lesson":
+                    await page.click(
+                        'button[type="submit"]:has-text("Complete lesson")',
+                        timeout=8000,
+                    )
+                    # Backend takes 5-10s to persist. We trust the click — Circle's
+                    # button text doesn't reliably update on the same page anyway,
+                    # so verify-by-reload gives false negatives. If the chain is
+                    # actually broken, the next lesson will hit LOCKED and trigger
+                    # the walk-back recovery which uses the verified-click helper.
+                    await page.wait_for_timeout(8000)
+                    lesson.completed = True
+                    print(f"    marked complete")
             except Exception as exc:
                 print(f"    complete click failed: {type(exc).__name__}: {exc}")
         elif "completed" in cb_text:
