@@ -75,6 +75,11 @@ def _artist_score(a: str, b: str) -> float:
     return overlap if overlap > 0 else SequenceMatcher(None, _normalise(a), _normalise(b)).ratio()
 
 
+# Detects "Actual Artist – Actual Title" embedded in the title field.
+# Common in DJ show tracks where the host is the AM artist but the real
+# artist–title pair is encoded in the title with an en/em dash.
+_EMBEDDED_ARTIST_RE = re.compile(r"^(.+?)\s+[–—]\s+(.+)$")
+
 _REMIX_STRIP_RE = re.compile(
     r"\s*[\(\[][^\)\]]*\b(?:remix|mix|edit|rework|dub|bootleg|mashup|version|vip|flip)\b[^\)\]]*[\)\]]",
     re.I,
@@ -117,6 +122,10 @@ def best_match(
         )
         bp_artists = ", ".join(all_bp_artists)
         score = combined_score(am_name, am_artist, bp_name, bp_artists)
+        # If the title encodes "Actual Artist – Actual Title", try that split too.
+        m = _EMBEDDED_ARTIST_RE.match(am_name)
+        if m:
+            score = max(score, combined_score(m.group(2), m.group(1), bp_name, bp_artists))
         if score > best_score:
             best_score = score
             best = c
