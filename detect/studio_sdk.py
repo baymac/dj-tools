@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import bisect
 import json
+import queue
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -421,6 +423,11 @@ def _shape_result(beatport_id: int, result: dict) -> Optional[dict]:
 
 # ── Long-running Node helper ──────────────────────────────────────────────────
 
+# Per-track wall-clock timeout (seconds). Demucs on a 10-min track takes ~2 min
+# on Apple Silicon; 5 min gives plenty of headroom before we declare it stuck.
+_ANALYZE_TIMEOUT_S = 300
+
+
 class SdkHelper:
     """Wraps the dj_studio_sdk.js subprocess with line-based JSON IPC."""
 
@@ -429,6 +436,19 @@ class SdkHelper:
         self._staging = staging
         self._verbose = verbose
         self._proc: Optional[subprocess.Popen] = None
+        self._read_q: queue.Queue = queue.Queue()
+        self._reader_thread: Optional[threading.Thread] = None
+
+    def _start_reader(self) -> None:
+        """Drain stdout in a background thread so _read() can have a deadline."""
+        def _drain():
+            assert self._proc and self._proc.stdout
+            for line in self._proc.stdout:
+                self._read_q.put(line)
+            self._read_q.put(None)  # sentinel: process stdout closed
+
+        self._reader_thread = threading.Thread(target=_drain, daemon=True)
+        self._reader_thread.start()
 
     def __enter__(self):
         self._proc = subprocess.Popen(
@@ -439,6 +459,7 @@ class SdkHelper:
             text=True,
             bufsize=1,
         )
+        self._start_reader()
         self._send({"cmd": "init", "stagingApi": self._staging, "djsAccessJwt": self._jwt})
         while True:
             evt = self._read()
@@ -468,11 +489,13 @@ class SdkHelper:
         self._proc.stdin.write(json.dumps(msg) + "\n")
         self._proc.stdin.flush()
 
-    def _read(self) -> Optional[dict]:
-        assert self._proc and self._proc.stdout
-        line = self._proc.stdout.readline()
-        if not line:
-            return None
+    def _read(self, timeout: Optional[float] = None) -> Optional[dict]:
+        try:
+            line = self._read_q.get(timeout=timeout)
+        except queue.Empty:
+            return {"event": "_timeout"}
+        if line is None:
+            return None  # stdout closed — process exited
         try:
             return json.loads(line)
         except Exception:
@@ -497,14 +520,23 @@ class SdkHelper:
         """Send analyze + read events until we get the matching analysis or error.
 
         Returns {"ok": True, "result": {...}} or {"ok": False, "message": "..."}.
+        Times out after _ANALYZE_TIMEOUT_S seconds if the Node helper goes silent.
         """
         self._send({"cmd": "analyze", "beatport_id": beatport_id})
         while True:
-            evt = self._read()
+            evt = self._read(timeout=_ANALYZE_TIMEOUT_S)
             if evt is None:
                 stderr = self._proc.stderr.read() if self._proc.stderr else ""
                 return {"ok": False, "message": f"helper closed: {stderr.strip()[:300]}"}
             kind = evt.get("event")
+            if kind == "_timeout":
+                # Node helper went silent for _ANALYZE_TIMEOUT_S — kill it so the
+                # caller can restart a fresh helper for the next track.
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+                return {"ok": False, "message": f"analyze timed out after {_ANALYZE_TIMEOUT_S}s (helper killed)"}
             if kind == "log" and self._verbose:
                 console.log(f"[dim]helper:[/dim] {evt.get('message')}")
             elif kind == "analysis" and evt.get("beatport_id") == beatport_id:
