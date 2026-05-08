@@ -508,7 +508,7 @@ def classify(signals: dict, lesson_title: str, network_urls: Optional[list[str]]
 
 # ---------- extraction ----------
 
-async def _extract_lesson(page, lesson: Lesson, signals: dict, video_urls: list[str]) -> None:
+async def _extract_lesson(page, lesson: Lesson, signals: dict, video_urls: list[str], force: bool = False) -> None:
     """Populate `lesson` fields based on its classified type."""
     lesson.content_html = signals.get("content_html") or ""
 
@@ -1479,7 +1479,7 @@ async def _process_lesson(ctx, lesson: Lesson, force: bool = False) -> None:
             (KEYS_DIR / f"{lesson.id}.key").write_bytes(key_bytes[0])
 
         # Extract
-        await _extract_lesson(page, lesson, signals, video_urls)
+        await _extract_lesson(page, lesson, signals, video_urls, force=force)
 
         # Download inline images and rewrite contentHtml to local paths.
         # Signed CDN URLs expire — must do this in the same session.
