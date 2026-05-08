@@ -6,7 +6,7 @@ Videos use TWO platforms — Circle's native HLS player and Dyntube iframes.
 
 Usage:
     uv run helpers/download_course.py login    <course_url>
-    uv run helpers/download_course.py download <course_url> [--limit N] [--dry-run] [--lesson-ids ID1,ID2,...]
+    uv run helpers/download_course.py download <course_url> [--limit N] [--dry-run] [--lesson-ids ID1,ID2,...] [--out-dir PATH]
 
 Stages:
   1. Login: opens headed browser, you sign in, session saved to persistent profile
@@ -56,16 +56,33 @@ class _Tee:
             s.flush()
 
 
+# These are set at startup via _set_output_dir() so --out-dir can override them.
 VIDEOS_DIR = COURSE_DIR / "videos"
 IMAGES_DIR = COURSE_DIR / "images"
 FILES_DIR = COURSE_DIR / "files"
 QUIZZES_DIR = COURSE_DIR / "quizzes"
 THUMBS_DIR = COURSE_DIR / "thumbs"
 SUBS_DIR = COURSE_DIR / "subtitles"
-KEYS_DIR = COURSE_DIR / "_keys"        # local cache of captured AES keys
-HLS_DIR = COURSE_DIR / "_hls"          # local cache of rewritten m3u8 manifests
+KEYS_DIR = COURSE_DIR / "_keys"
+HLS_DIR = COURSE_DIR / "_hls"
 MANIFEST_FILE = COURSE_DIR / "lessons.json"
 FAILED_FILE = COURSE_DIR / "failed.json"
+
+
+def _set_output_dir(path: Path) -> None:
+    """Redirect all output paths to a custom directory (used by --out-dir)."""
+    global VIDEOS_DIR, IMAGES_DIR, FILES_DIR, QUIZZES_DIR, THUMBS_DIR
+    global SUBS_DIR, KEYS_DIR, HLS_DIR, MANIFEST_FILE, FAILED_FILE
+    VIDEOS_DIR = path / "videos"
+    IMAGES_DIR = path / "images"
+    FILES_DIR = path / "files"
+    QUIZZES_DIR = path / "quizzes"
+    THUMBS_DIR = path / "thumbs"
+    SUBS_DIR = path / "subtitles"
+    KEYS_DIR = path / "_keys"
+    HLS_DIR = path / "_hls"
+    MANIFEST_FILE = path / "lessons.json"
+    FAILED_FILE = path / "failed.json"
 
 COURSE_PROFILE_DIR = STATE_DIR / "course-browser-profile"
 
@@ -1794,6 +1811,7 @@ def main() -> None:
     limit = None
     dry_run = False
     lesson_ids = None
+    out_dir = None
     i = 0
     while i < len(extra):
         if extra[i] == "--limit" and i + 1 < len(extra):
@@ -1802,8 +1820,13 @@ def main() -> None:
             dry_run = True; i += 1
         elif extra[i] == "--lesson-ids" and i + 1 < len(extra):
             lesson_ids = set(extra[i + 1].split(",")); i += 2
+        elif extra[i] == "--out-dir" and i + 1 < len(extra):
+            out_dir = Path(extra[i + 1]).expanduser().resolve(); i += 2
         else:
             print(f"Unknown arg: {extra[i]}"); sys.exit(1)
+
+    if out_dir:
+        _set_output_dir(out_dir)
 
     if cmd == "login":
         asyncio.run(cmd_login(url))
@@ -1812,6 +1835,8 @@ def main() -> None:
         orig_stdout = sys.stdout
         sys.stdout = _Tee(orig_stdout, log_fh)
         print(f"Log: {log_p}")
+        if out_dir:
+            print(f"Output: {out_dir}")
         try:
             with caffeinate():
                 asyncio.run(cmd_download(url, limit=limit, dry_run=dry_run, lesson_ids=lesson_ids))

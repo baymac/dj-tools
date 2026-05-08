@@ -589,6 +589,7 @@ lesson so progress survives interruption.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--out-dir PATH` | `~/Music/dj-tools/course/` | Write all output (videos, manifest, quizzes, etc.) to a custom directory instead of the default. Use this to download a second course without clobbering the first. |
 | `--limit N` | all | Stop after processing N lessons. The full manifest is still written for all discovered lessons; only the first N are actively scraped. Useful for smoke-testing after a code change. |
 | `--dry-run` | off | Discover and print all lessons (title, ID, type, status) without downloading anything. No browser navigation, no file writes. |
 | `--lesson-ids ID1,ID2,...` | all | Re-scrape only the listed lesson IDs, bypassing the normal "already complete" skip. Implies `force=True` for those lessons — quizzes are re-brute-forced from scratch even if `quizzes/<id>.json` already exists. Use after fixing a scraper bug, recovering a failed video, or re-running timed-out quizzes. |
