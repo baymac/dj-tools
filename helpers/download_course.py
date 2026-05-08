@@ -558,7 +558,7 @@ async def _extract_lesson(page, lesson: Lesson, signals: dict, video_urls: list[
 
     elif lesson.type == LessonType.QUIZ.value:
         # Brute-force discover correct answers, save full quiz JSON
-        await _extract_quiz(page, lesson)
+        await _extract_quiz(page, lesson, force=force)
         # After solving the quiz Circle may show a "Complete lesson" button that
         # wasn't present when we first read signals. Re-read now so the
         # completion click below sees the updated state.
@@ -733,16 +733,13 @@ async def _select_quiz_option(page, q_idx: int, o_idx: int) -> bool:
         return False
 
 
-async def _extract_quiz(page, lesson: Lesson) -> None:
+async def _extract_quiz(page, lesson: Lesson, force: bool = False) -> None:
     """Brute-force discover correct answers for a Circle quiz, save to quizzes/<id>.json."""
     QUIZZES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Already extracted — skip brute-force. The answers are on disk and the
-    # lesson may already be complete on Circle's backend from the previous run.
-    # Re-reading signals here lets the caller's completion-click logic detect
-    # the current state (disabled button = auto-completed, "Completed" = done).
+    # Already extracted — skip brute-force unless forced (e.g. via --lesson-ids).
     quiz_out = QUIZZES_DIR / f"{lesson.id}.json"
-    if quiz_out.exists():
+    if quiz_out.exists() and not force:
         lesson.quiz_file = f"quizzes/{lesson.id}.json"
         print(f"    quiz: already extracted — skipping brute-force")
         return
@@ -1355,7 +1352,7 @@ async def _ensure_completed(ctx, prev: Lesson) -> str:
             pass
 
 
-async def _process_lesson(ctx, lesson: Lesson) -> None:
+async def _process_lesson(ctx, lesson: Lesson, force: bool = False) -> None:
     """Open a fresh page, navigate to the lesson, classify + extract + maybe complete."""
     page = await ctx.new_page()
     page.set_default_timeout(30000)
@@ -1664,7 +1661,7 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
             # with 3s waits per submit easily exceeds 90s.
             lesson_timeout = 300 if lesson.type == LessonType.QUIZ.value else 90
             try:
-                await asyncio.wait_for(_process_lesson(ctx, lesson), timeout=lesson_timeout)
+                await asyncio.wait_for(_process_lesson(ctx, lesson, force=force), timeout=lesson_timeout)
             except asyncio.TimeoutError:
                 lesson.error = f"timeout {lesson_timeout}s"
                 print(f"    timeout {lesson_timeout}s — moving on")
@@ -1702,7 +1699,7 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                 lesson.error = None
                 lesson.type = LessonType.UNKNOWN.value
                 try:
-                    await asyncio.wait_for(_process_lesson(ctx, lesson), timeout=90)
+                    await asyncio.wait_for(_process_lesson(ctx, lesson, force=force), timeout=90)
                     if lesson.type != LessonType.LOCKED.value:
                         print(f"    recovered: type={lesson.type} completed={lesson.completed}",
                               flush=True)
