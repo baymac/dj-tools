@@ -559,14 +559,6 @@ async def _extract_lesson(page, lesson: Lesson, signals: dict, video_urls: list[
     elif lesson.type == LessonType.QUIZ.value:
         # Brute-force discover correct answers, save full quiz JSON
         await _extract_quiz(page, lesson, force=force)
-        # After solving the quiz Circle may show a "Complete lesson" button that
-        # wasn't present when we first read signals. Re-read now so the
-        # completion click below sees the updated state.
-        try:
-            await page.wait_for_timeout(2000)
-            signals = await page.evaluate(SIGNAL_JS)
-        except Exception:
-            pass
 
     # Attachments — for any type that might have files
     if signals.get("download_links"):
@@ -1481,6 +1473,16 @@ async def _process_lesson(ctx, lesson: Lesson, force: bool = False) -> None:
         # Extract
         await _extract_lesson(page, lesson, signals, video_urls, force=force)
 
+        # For quiz lessons, re-read signals after extraction — the "Complete lesson"
+        # button only appears/enables after quiz answers are submitted, which happens
+        # inside _extract_lesson. The completion block below needs the updated state.
+        if lesson.type == LessonType.QUIZ.value:
+            try:
+                await page.wait_for_timeout(2000)
+                signals = await page.evaluate(SIGNAL_JS)
+            except Exception:
+                pass
+
         # Download inline images and rewrite contentHtml to local paths.
         # Signed CDN URLs expire — must do this in the same session.
         await _download_inline_images(lesson)
@@ -1615,6 +1617,8 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
         # Tokens for Dyntube/Circle expire fast — must download in same session.
         for i, lesson in enumerate(lessons, 1):
             cached = cache.get(lesson.id) or {}
+            # --lesson-ids bypasses the skip so targeted lessons are re-scraped.
+            force = lesson_ids is not None and lesson.id in lesson_ids
             # Always merge cached state into the lesson so the manifest stays
             # complete even when --limit caps the active processing count.
             if cached:
@@ -1638,11 +1642,9 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                     for s in cached.get("subtitles", []) or []
                 ]
                 # Skip if fully done — already has video file (or doesn't need one).
-                # --lesson-ids bypasses the skip so targeted lessons are re-scraped.
                 non_video = lesson.type not in (
                     LessonType.VIDEO_CIRCLE.value, LessonType.VIDEO_DYNTUBE.value,
                 )
-                force = lesson_ids is not None and lesson.id in lesson_ids
                 if not force and lesson.extracted and lesson.completed and (non_video or lesson.video_file):
                     print(f"  [{i:03d}/{len(lessons)}] {lesson.title[:55]} (cached: {lesson.type})")
                     continue
