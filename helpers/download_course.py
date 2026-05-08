@@ -1330,7 +1330,7 @@ async def _ensure_completed(ctx, prev: Lesson) -> str:
                 for (const b of document.querySelectorAll('button[type="submit"]')) {
                     const t = (b.textContent || '').trim().toLowerCase();
                     if (t === 'completed') return { kind: 'completed' };
-                    if (t === 'complete lesson') return { kind: 'pending' };
+                    if (t === 'complete lesson') return { kind: b.disabled ? 'disabled' : 'pending' };
                 }
                 return { kind: 'none' };
             }
@@ -1341,6 +1341,8 @@ async def _ensure_completed(ctx, prev: Lesson) -> str:
             return "completed"
         if kind == "locked":
             return "locked"
+        if kind == "disabled":
+            return "disabled"  # quiz passed but needs re-submission to re-enable button
         if kind == "pending":
             ok = await _click_and_verify_complete(page)
             return "completed" if ok else "pending"
@@ -1494,27 +1496,24 @@ async def _process_lesson(ctx, lesson: Lesson, force: bool = False) -> None:
         cb = signals.get("complete_button") or {}
         cb_text = (cb.get("text") or "").strip().lower()
         if cb_text == "complete lesson":
-            # After a quiz is passed Circle temporarily disables the "Complete lesson"
-            # button while it processes the result. Wait up to 20s for it to re-enable
-            # before attempting the click.
             if lesson.type == LessonType.QUIZ.value:
-                # After passing a quiz, Circle auto-marks the lesson complete on its
-                # backend and leaves the "Complete lesson" button permanently disabled
-                # as a non-interactive indicator. Check if the button is disabled; if
-                # so, treat the lesson as already completed without clicking.
-                quiz_btn_disabled = await page.evaluate("""
-                    () => {
-                        for (const b of document.querySelectorAll('button[type="submit"]')) {
-                            if ((b.textContent || '').trim().toLowerCase() === 'complete lesson')
-                                return b.disabled;
+                # After submitting a quiz, Circle briefly disables the "Complete lesson"
+                # button while it registers the result. Wait up to 30s for it to
+                # re-enable before clicking. Do NOT treat disabled as auto-completed —
+                # an explicit click is always required to unlock the next lesson.
+                for _ in range(30):
+                    still_disabled = await page.evaluate("""
+                        () => {
+                            for (const b of document.querySelectorAll('button[type="submit"]')) {
+                                if ((b.textContent || '').trim().toLowerCase() === 'complete lesson')
+                                    return b.disabled;
+                            }
+                            return false;
                         }
-                        return false;
-                    }
-                """)
-                if quiz_btn_disabled:
-                    lesson.completed = True
-                    print(f"    marked complete (quiz auto-completed by platform)")
-                    cb_text = ""  # skip the click below
+                    """)
+                    if not still_disabled:
+                        break
+                    await page.wait_for_timeout(1000)
             try:
                 if cb_text == "complete lesson":
                     await page.click(
@@ -1679,6 +1678,34 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                     prev = lessons[j]
                     res = await _ensure_completed(ctx, prev)
                     print(f"      #{j + 1} {prev.title[:40]}: {res}", flush=True)
+                    if res == "disabled":
+                        # Quiz lesson: passed but "Complete lesson" button is disabled
+                        # because the answers haven't been re-submitted in this session.
+                        # Re-run full processing (brute-force → submit → click).
+                        print(f"      #{j + 1} re-processing quiz to re-enable button…", flush=True)
+                        prev.error = None
+                        prev.type = LessonType.UNKNOWN.value
+                        try:
+                            await asyncio.wait_for(
+                                _process_lesson(ctx, prev, force=True),
+                                timeout=300,
+                            )
+                            print(f"      #{j + 1} completed={prev.completed}", flush=True)
+                        except asyncio.TimeoutError:
+                            prev.error = "retry timeout"
+                            print(f"      #{j + 1} reprocess timeout", flush=True)
+                        except Exception as exc:
+                            prev.error = f"retry {type(exc).__name__}: {exc}"
+                            print(f"      #{j + 1} reprocess error: {exc}", flush=True)
+                        # Forward replay regardless of outcome
+                        for k in range(j + 1, i - 1):
+                            mid = lessons[k]
+                            res2 = await _ensure_completed(ctx, mid)
+                            print(f"      #{k + 1} {mid.title[:40]}: {res2}", flush=True)
+                            walked.append(k)
+                            if res2 in ("locked", "disabled"):
+                                break
+                        break
                     if res in ("completed", "pending"):
                         # Found the chain anchor — replay forward sequentially.
                         # "pending" means the button was already clicked (verification
@@ -1691,7 +1718,7 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
                             res2 = await _ensure_completed(ctx, mid)
                             print(f"      #{k + 1} {mid.title[:40]}: {res2}", flush=True)
                             walked.append(k)
-                            if res2 == "locked":
+                            if res2 in ("locked", "disabled"):
                                 break  # chain still blocked here — stop
                         break
                     walked.append(j)
