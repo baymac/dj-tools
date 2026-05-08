@@ -177,6 +177,9 @@ def _run_studio_analyse_impl(
     import datetime as _dt
     _today_iso = _dt.date.today().isoformat()
 
+    def _is_helper_killed(err: str) -> bool:
+        return "helper killed" in err
+
     def _is_auth_failure(err: str) -> bool:
         return "status=401" in err or "Signature is invalid" in err
 
@@ -275,97 +278,130 @@ def _run_studio_analyse_impl(
             )
         return True, "", res
 
-    with SdkHelper(access_jwt, verbose=verbose) as helper, progress:
+    def _make_helper():
+        h = SdkHelper(access_jwt, verbose=verbose)
+        h.__enter__()
+        return h
+
+    def _kill_helper(h):
+        try:
+            h.__exit__(None, None, None)
+        except Exception:
+            pass
+
+    with progress:
+        helper = _make_helper()
         task = progress.add_task("Analysing…", total=len(rows))
-        for row in rows:
-            counts["seen"] += 1
-            artist = row["artist"] or ""
-            title = row["title"] or ""
-            progress.update(task, advance=1, description=f"{artist} — {title}")
+        try:
+            for row in rows:
+                counts["seen"] += 1
+                artist = row["artist"] or ""
+                title = row["title"] or ""
+                progress.update(task, advance=1, description=f"{artist} — {title}")
 
-            ok, err, res = _process_one(row, helper)
-            if not ok and _is_auth_failure(err):
-                ok, err, res = _refresh_jwt_and_retry(row, helper, attempt_label=" [post-refresh]")
-                if not ok and _is_auth_failure(err):
-                    progress.stop()
-                    raise RuntimeError(
-                        f"cf.dj.studio still rejecting our JWT after a fresh refresh. "
-                        f"Wrote {counts['ok']}/{counts['seen']} tracks before the failure.\n\n"
-                        f"Open DJ Studio, sign back in, quit (Cmd+Q), and re-run."
+                ok, err, res = _process_one(row, helper)
+                if not ok and _is_helper_killed(err):
+                    progress.log(
+                        f"[yellow]bp:{row['beatport_id']} timed out — restarting Node helper[/yellow]"
                     )
-            # Beatport SDK token-stale detection — uses real diagnostic fields
-            # (bp_state + error_props) forwarded by the helper. Auth markers
-            # (401/403/unauthorized/expired/etc.) abort cleanly without
-            # bumping the failure sidecar for the affected track.
-            if not ok and _is_bp_token_stale(res):
-                progress.stop()
-                bp_state = res.get("bp_state")
-                ep = res.get("error_props") or {}
-                raise RuntimeError(
-                    f"\n[Beatport SDK] auth/credential failure detected on bp:{row['beatport_id']}\n"
-                    f"bp_state={bp_state!r}  error={err[:200]}\n"
-                    f"error_props={ep}\n\n"
-                    f"Cached Beatport OAuth token is stale or invalid.\n"
-                    f"Fix: open DJ Studio briefly (it auto-refreshes the token),\n"
-                    f"     quit it (Cmd+Q), then re-run studio-analyse.\n\n"
-                    f"Wrote {counts['ok']}/{counts['seen']} tracks before bailing.\n"
-                    f"This track was NOT counted as failed — it will retry naturally next run."
-                )
-            if ok:
-                counts["ok"] += 1
-                _clear_failure(failures, row["beatport_id"])
-            elif _is_audio_unavailable(err) and _is_pre_release(row):
-                # Pre-release: Beatport withholds audio until release_date. Skip
-                # without bumping the failure counter so the next run after the
-                # release date will retry naturally.
-                counts["pre_release_skipped"] += 1
-                progress.log(
-                    f"[dim]bp:{row['beatport_id']} skip — pre-release "
-                    f"({row['release_date']}, drops in the future)[/dim]"
-                )
-            else:
-                failed_rows.append({"row": row, "error": err})
-                if verbose:
-                    progress.log(f"[yellow]bp:{row['beatport_id']} first-pass failed:[/yellow] {err[:160]}")
-
-        if failed_rows:
-            console.print(f"[dim]Retrying {len(failed_rows)} failed track(s) after 5s pause…[/dim]")
-            import time as _t
-            _t.sleep(5)
-            retry_task = progress.add_task("Retrying…", total=len(failed_rows))
-            still_failed: list[dict] = []
-            for entry in failed_rows:
-                row = entry["row"]
-                progress.update(retry_task, advance=1,
-                                description=f"{row['artist']} — {row['title']} (retry)")
-                ok, err, res = _process_one(row, helper, attempt_label=" [retry]")
+                    _kill_helper(helper)
+                    helper = _make_helper()
+                    failed_rows.append({"row": row, "error": err})
+                    continue
                 if not ok and _is_auth_failure(err):
-                    ok, err, res = _refresh_jwt_and_retry(row, helper, attempt_label=" [retry post-refresh]")
+                    ok, err, res = _refresh_jwt_and_retry(row, helper, attempt_label=" [post-refresh]")
                     if not ok and _is_auth_failure(err):
                         progress.stop()
                         raise RuntimeError(
-                            f"cf.dj.studio still rejecting our JWT after a fresh refresh during retry pass. "
-                            f"Wrote {counts['ok']}/{counts['seen']} tracks before the failure."
+                            f"cf.dj.studio still rejecting our JWT after a fresh refresh. "
+                            f"Wrote {counts['ok']}/{counts['seen']} tracks before the failure.\n\n"
+                            f"Open DJ Studio, sign back in, quit (Cmd+Q), and re-run."
                         )
+                # Beatport SDK token-stale detection — uses real diagnostic fields
+                # (bp_state + error_props) forwarded by the helper. Auth markers
+                # (401/403/unauthorized/expired/etc.) abort cleanly without
+                # bumping the failure sidecar for the affected track.
                 if not ok and _is_bp_token_stale(res):
                     progress.stop()
+                    bp_state = res.get("bp_state")
+                    ep = res.get("error_props") or {}
                     raise RuntimeError(
-                        f"\n[Beatport SDK] auth/credential failure on retry of bp:{row['beatport_id']}\n"
-                        f"bp_state={res.get('bp_state')!r}  error={err[:200]}\n\n"
-                        f"Cached Beatport OAuth token is stale.\n"
-                        f"Fix: open DJ Studio briefly, quit (Cmd+Q), re-run."
+                        f"\n[Beatport SDK] auth/credential failure detected on bp:{row['beatport_id']}\n"
+                        f"bp_state={bp_state!r}  error={err[:200]}\n"
+                        f"error_props={ep}\n\n"
+                        f"Cached Beatport OAuth token is stale or invalid.\n"
+                        f"Fix: open DJ Studio briefly (it auto-refreshes the token),\n"
+                        f"     quit it (Cmd+Q), then re-run studio-analyse.\n\n"
+                        f"Wrote {counts['ok']}/{counts['seen']} tracks before bailing.\n"
+                        f"This track was NOT counted as failed — it will retry naturally next run."
                     )
                 if ok:
                     counts["ok"] += 1
-                    counts["retried"] += 1
                     _clear_failure(failures, row["beatport_id"])
+                elif _is_audio_unavailable(err) and _is_pre_release(row):
+                    # Pre-release: Beatport withholds audio until release_date. Skip
+                    # without bumping the failure counter so the next run after the
+                    # release date will retry naturally.
+                    counts["pre_release_skipped"] += 1
+                    progress.log(
+                        f"[dim]bp:{row['beatport_id']} skip — pre-release "
+                        f"({row['release_date']}, drops in the future)[/dim]"
+                    )
                 else:
-                    counts["fail"] += 1
-                    still_failed.append({"row": row, "error": err})
-                    _record_failure(failures, row["beatport_id"], err)
+                    failed_rows.append({"row": row, "error": err})
                     if verbose:
-                        progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {err[:160]}")
-            failed_rows = still_failed
+                        progress.log(f"[yellow]bp:{row['beatport_id']} first-pass failed:[/yellow] {err[:160]}")
+
+            if failed_rows:
+                console.print(f"[dim]Retrying {len(failed_rows)} failed track(s) after 5s pause…[/dim]")
+                import time as _t
+                _t.sleep(5)
+                retry_task = progress.add_task("Retrying…", total=len(failed_rows))
+                still_failed: list[dict] = []
+                for entry in failed_rows:
+                    row = entry["row"]
+                    progress.update(retry_task, advance=1,
+                                    description=f"{row['artist']} — {row['title']} (retry)")
+                    ok, err, res = _process_one(row, helper, attempt_label=" [retry]")
+                    if not ok and _is_helper_killed(err):
+                        progress.log(
+                            f"[yellow]bp:{row['beatport_id']} timed out on retry — restarting Node helper[/yellow]"
+                        )
+                        _kill_helper(helper)
+                        helper = _make_helper()
+                        counts["fail"] += 1
+                        still_failed.append({"row": row, "error": err})
+                        _record_failure(failures, row["beatport_id"], err)
+                        continue
+                    if not ok and _is_auth_failure(err):
+                        ok, err, res = _refresh_jwt_and_retry(row, helper, attempt_label=" [retry post-refresh]")
+                        if not ok and _is_auth_failure(err):
+                            progress.stop()
+                            raise RuntimeError(
+                                f"cf.dj.studio still rejecting our JWT after a fresh refresh during retry pass. "
+                                f"Wrote {counts['ok']}/{counts['seen']} tracks before the failure."
+                            )
+                    if not ok and _is_bp_token_stale(res):
+                        progress.stop()
+                        raise RuntimeError(
+                            f"\n[Beatport SDK] auth/credential failure on retry of bp:{row['beatport_id']}\n"
+                            f"bp_state={res.get('bp_state')!r}  error={err[:200]}\n\n"
+                            f"Cached Beatport OAuth token is stale.\n"
+                            f"Fix: open DJ Studio briefly, quit (Cmd+Q), re-run."
+                        )
+                    if ok:
+                        counts["ok"] += 1
+                        counts["retried"] += 1
+                        _clear_failure(failures, row["beatport_id"])
+                    else:
+                        counts["fail"] += 1
+                        still_failed.append({"row": row, "error": err})
+                        _record_failure(failures, row["beatport_id"], err)
+                        if verbose:
+                            progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {err[:160]}")
+                failed_rows = still_failed
+        finally:
+            _kill_helper(helper)
 
     try:
         _save_failures(failures)

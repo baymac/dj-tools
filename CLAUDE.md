@@ -31,8 +31,10 @@ detect/                         Track detection + enrichment pipeline (Stages 2-
   studio_analyse.py             Stage 5: SDK analysis → enriched_tracks_analysis (DB only)
   export_to_rekordbox.py        Stage 6a: idempotent pending → rekordbox playlist
   import_rekordbox_analysis.py  Stage 6b: ingest PSSI + cues from ANLZ
-  instagram.py / mixcloud.py / youtube.py / radio.py / podbean.py / reddit.py
-                                Stage 2: per-platform Shazam capture
+  instagram.py / mixcloud.py / youtube.py / soundcloud.py / radio.py /
+  podbean.py / reddit.py / topdjmixes.py
+                                Stage 2: per-platform capture (Shazam-based for
+                                audio sources, paste-into-vi for reddit/topdjmixes)
   shazam.py / parser.py         Audio recognition + tracklist parsing
 
 sync/                           Stage 1: Apple Music → Beatport

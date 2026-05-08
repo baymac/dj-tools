@@ -44,8 +44,8 @@ DJ Studio must be **closed** before `detect studio-analyse`.
                                       Beatport playlists ────┐
                                                              │
    Audio sources                                             │  Stage 4: dj detect sync-beatport
-   (Instagram, YouTube, Mixcloud, Radio Garden,              │
-    Podbean, Reddit)                                         │
+   (Instagram, YouTube, Mixcloud, SoundCloud,                │
+    Radio Garden, Podbean, Reddit, topdjmixes)               │
         │                                                    │
         │  Stage 2: dj detect <platform>                     │
         ↓                                                    │
@@ -95,8 +95,10 @@ dj
 │   ├── radio-garden <url>                             [--interval N] [--capture N] [--duration N]
 │   ├── mixcloud <url>                                 [--username] [--password] [--interval N]
 │   ├── youtube <url>                                  [--interval N] [--capture N] [--output] [--json]
+│   ├── soundcloud <url>                               [--interval N] [--capture N] [--output] [--json]
 │   ├── podbean <url>                                  [--interval N] [--capture N] [--output] [--json]
-│   ├── reddit <url>
+│   ├── reddit <url>                                   (paste-into-vi tracklist parser)
+│   ├── topdjmixes <url>                               (paste-into-vi tracklist parser)
 │   │
 │   ├── history / sessions / *-history                 Inspect detection state
 │   ├── *-delete-session <id>                          Remove a scan session
@@ -170,9 +172,9 @@ The `--library` mode tracks where it left off via the `cursors` table (last `lib
 
 # Stage 2 — detect tracks from audio sources
 
-Identifies tracks playing in Instagram posts, radio streams, Mixcloud mixes, YouTube videos, Podbean episodes, and Reddit text posts via Shazam. Results land in `detected_tracks` (one row per unique track, deduped by Shazam key or artist + title). Re-scanning the same URL never creates duplicates.
+Identifies tracks playing in Instagram posts, radio streams, Mixcloud mixes, YouTube videos, SoundCloud mixes, and Podbean episodes via Shazam, or extracts them from Reddit / topdjmixes text posts via a paste-into-vi parser. Results land in `detected_tracks` (one row per unique track, deduped by Shazam key or artist + title). Re-scanning the same URL never creates duplicates.
 
-Mixcloud, YouTube, and Podbean scans auto-resume from where they left off if interrupted.
+Mixcloud, YouTube, SoundCloud, and Podbean scans auto-resume from where they left off if interrupted.
 
 ```bash
 uv run dj_cli.py detect instagram https://www.instagram.com/p/XXXXX/
@@ -183,14 +185,22 @@ uv run dj_cli.py detect radio-garden <url> --duration 120   # run for 2 hours
 
 uv run dj_cli.py detect mixcloud https://www.mixcloud.com/djname/mixname/
 uv run dj_cli.py detect youtube https://www.youtube.com/watch?v=XXXX
+uv run dj_cli.py detect soundcloud https://soundcloud.com/dj/mix-name        # share-link tracking params auto-stripped
 uv run dj_cli.py detect podbean https://www.podbean.com/ew/pb-XXXX
 uv run dj_cli.py detect reddit https://www.reddit.com/r/HypeTracks/comments/XXXXX/post_title/
+uv run dj_cli.py detect topdjmixes https://www.topdjmixes.com/some-mix-page/
 ```
 
 **Credentials:**
 - Instagram: `IG_USERNAME` / `IG_PASSWORD` in `.env`, or `dj detect login-instagram`.
 - Mixcloud: `MC_USERNAME` / `MC_PASSWORD`, or `dj detect login-mixcloud`.
+- SoundCloud: optional OAuth via `SOUNDCLOUD_CLIENT_ID` / `SOUNDCLOUD_CLIENT_SECRET` (register an app at https://soundcloud.com/you/apps). When configured, set/track metadata comes from SoundCloud's official API — clean artist/title fields, no rate-limit pain. When absent, falls back to yt-dlp scrape + URL-slug derivation (works but lower fidelity). Share-link tracking params (`?si=…`, `&utm_*=…`) are stripped automatically. The handler auto-detects three URL shapes:
+    - **Set** (`/<user>/sets/<slug>`) → enumerate child tracks via metadata, no audio download.
+    - **Single track ≤15 min** → save the track's metadata as one row (no Shazam scan).
+    - **Single track >15 min** (radio episodes, DJ mixes) → Shazam-by-chunks audio scan.
+    - **Personalized `/discover/` URLs** (e.g. `personalized-tracks::<user>:<id>`) → require user-bound OAuth (run `dj detect login-soundcloud` once; opens browser, OAuth dance, saves a refresh token). After login the handler auto-uses the user token for all calls; without it `/discover/` URLs return a clear "login required" message. Make sure your SoundCloud app has `http://localhost:8080/callback` (or your custom `SOUNDCLOUD_REDIRECT_URI`) in its Redirect URI list.
 - Reddit: none. Public JSON API. Works on any subreddit text post whose body contains `Artist - Title` lines (markdown links and `[brackets]` are stripped).
+- topdjmixes: none. Paste-into-vi flow (same parser shape as Reddit). Works on any tracklist with `01. Artist – Title` lines — leading position numbers and `[label]` brackets are stripped.
 
 ### History and sessions
 
@@ -200,10 +210,12 @@ uv run dj_cli.py detect history -n 100
 
 uv run dj_cli.py detect sessions youtube       # session list with track counts
 uv run dj_cli.py detect sessions mixcloud
+uv run dj_cli.py detect sessions soundcloud
 uv run dj_cli.py detect sessions radio
 uv run dj_cli.py detect sessions instagram
 uv run dj_cli.py detect sessions podbean
 uv run dj_cli.py detect sessions reddit
+uv run dj_cli.py detect sessions topdjmixes
 
 uv run dj_cli.py detect sessions podbean 24    # detected_tracks for one session, in a table
 uv run dj_cli.py detect sessions youtube 7     # (Pos, Artist, Title, Apple Music URL, enrich_outcome)
@@ -213,13 +225,17 @@ uv run dj_cli.py detect instagram-history --tracks  # flat track list only
 uv run dj_cli.py detect radio-history
 uv run dj_cli.py detect mixcloud-history
 uv run dj_cli.py detect youtube-history
+uv run dj_cli.py detect soundcloud-history
 uv run dj_cli.py detect podbean-history
 uv run dj_cli.py detect reddit-history
+uv run dj_cli.py detect topdjmixes-history
 
 uv run dj_cli.py detect mixcloud-delete-session <id>
 uv run dj_cli.py detect youtube-delete-session <id>
+uv run dj_cli.py detect soundcloud-delete-session <id>
 uv run dj_cli.py detect podbean-delete-session <id>
 uv run dj_cli.py detect reddit-delete-session <id>
+uv run dj_cli.py detect topdjmixes-delete-session <id>
 ```
 
 ---
@@ -499,7 +515,7 @@ All tables live in `~/Music/dj-tools/dj.db`.
 | Table | Written by | Contents |
 |---|---|---|
 | `detected_tracks` | Stage 2 (`detect`) | One row per unique track. `enrich_outcome` records miss state (`not_found`, `fuzzy_miss`). Deduped by Shazam key or artist+title. |
-| `sessions` | Stage 2 (`detect`) | One row per unique URL scanned (youtube, mixcloud, radio, instagram, podbean, reddit). Tracks scan progress and resume position. |
+| `sessions` | Stage 2 (`detect`) | One row per unique URL scanned (youtube, mixcloud, soundcloud, radio, instagram, podbean, reddit, topdjmixes). Tracks scan progress and resume position. |
 | `track_sessions` | Stage 2 (`detect`) | Junction: maps each track to the session(s) it appeared in, with timestamp position. |
 | `enriched_tracks` | Stage 3 (`detect enrich`), Stage 4 (`detect sync-beatport`) | All Beatport-derived data on one row: id, detected_track_id, beatport_id, beatport_link, bpm, key, genre, release_date, artist, title, apple_music_url, enriched_at, plus the catalog-detail extras (mix_name, label, catalog_number, isrc, sub_genre, length_ms). |
 | `enriched_tracks_analysis` | Stage 5 (`detect studio-analyse`) creates rows; Stage 6a/6b update them | Sparse — only tracks that have been through `studio-analyse`. Keyed on `beatport_id` (PK). Carries the DJ Studio analysis fields (mik_key, mik_nrg, mik_key_secondary, mik_key_confidence, tempo_precise, duration_sec, cue_points_count, vocals/drums/bass/melody {avg,peak}, analysis_json with full energy segments + 1Hz stem curves + per-segment stem RMS), rekordbox round-trip (rk_analysis_json), and per-stage timestamps (dj_studio_at, rekordbox_export_at, rekordbox_analysis_at). JOIN with `enriched_tracks` for the basic+catalog fields. |
@@ -540,6 +556,125 @@ uv run helpers/delete_beatport_track.py \
 
 ---
 
+## Course viewer
+
+Download and watch the Pete Tong DJ Academy / Circle course offline.
+All course data lives under `~/Music/dj-tools/course/` (or an SSD — see below).
+
+### Downloader
+
+#### `login`
+
+```bash
+uv run helpers/download_course.py login <course_url>
+```
+
+Opens a headed (visible) browser window. Sign in manually. The session is saved
+to a persistent browser profile at `~/Music/dj-tools/state/course-browser-profile/`
+and reused by every subsequent `download` run — you only need to `login` once (or
+after your session expires).
+
+#### `download`
+
+```bash
+uv run helpers/download_course.py download <course_url> [flags]
+```
+
+Resumes from where it left off. For each lesson in course order it: navigates,
+classifies the page type, extracts content (video, quiz, HTML, attachments),
+clicks "Complete lesson" to unlock the next, and writes the manifest after each
+lesson so progress survives interruption.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--out-dir PATH` | `~/Music/dj-tools/course/` | Write all output (videos, manifest, quizzes, etc.) to a custom directory instead of the default. Use this to download a second course without clobbering the first. |
+| `--limit N` | all | Stop after processing N lessons. The full manifest is still written for all discovered lessons; only the first N are actively scraped. Useful for smoke-testing after a code change. |
+| `--dry-run` | off | Discover and print all lessons (title, ID, type, status) without downloading anything. No browser navigation, no file writes. |
+| `--lesson-ids ID1,ID2,...` | all | Re-scrape only the listed lesson IDs, bypassing the normal "already complete" skip. Implies `force=True` for those lessons — quizzes are re-brute-forced from scratch even if `quizzes/<id>.json` already exists. Use after fixing a scraper bug, recovering a failed video, or re-running timed-out quizzes. |
+
+**Skip logic** — a lesson is skipped (cached) unless `--lesson-ids` targets it:
+- `extracted=True` AND `completed=True` AND video file present (or lesson has no video) → skip
+- Otherwise → process
+
+**Lesson types extracted:**
+
+| Type | Description |
+|------|-------------|
+| `video_circle` | Circle-native HLS video: m3u8 captured via network sniffer, segments downloaded, muxed to mp4 |
+| `video_dyntube` | Dyntube iframe video: AES-128 HLS key captured, manifest rewritten to local key URI, then downloaded |
+| `quiz` | Multiple-choice quiz: brute-forced to find correct answers, saved to `quizzes/<id>.json` |
+| `exercise` | Written exercise / assignment — HTML prose only, no video |
+| `guide` | Reference / guide page — HTML prose only |
+| `content` | Generic content page — HTML prose only |
+| `locked` | Not yet unlocked on the platform (prior lesson incomplete) |
+| `unknown` | Scraper couldn't classify the page (usually means it wasn't reached) |
+
+**Common re-scrape recipes:**
+
+```bash
+# Re-run a single failed quiz
+uv run helpers/download_course.py download <course_url> --lesson-ids 2569067
+
+# Re-run several timed-out quizzes at once
+uv run helpers/download_course.py download <course_url> --lesson-ids 2503039,2556782,2562957,2569067
+
+# Re-scrape unknown/unextracted lessons
+uv run helpers/download_course.py download <course_url> --lesson-ids 2623038,943070,943071
+
+# Test the first 5 lessons only
+uv run helpers/download_course.py download <course_url> --limit 5 --dry-run
+```
+
+**Output layout** under `~/Music/dj-tools/course/`:
+
+```
+lessons.json        full manifest — one entry per lesson
+videos/             downloaded mp4 files
+images/             lesson images
+files/              lesson file attachments
+quizzes/            quiz JSON (one file per quiz lesson)
+thumbs/             video poster frames
+subtitles/          VTT subtitle files
+_keys/              captured AES-128 keys for Dyntube HLS videos
+_hls/               rewritten m3u8 manifests (local key URIs)
+failed.json         lessons that errored or timed out during the last run
+```
+
+Logs are written automatically to `~/Music/dj-tools/logs/download-course/YYYY-MM-DD_HHMMSS.log`.
+The run holds a `caffeinate -i` power assertion so the Mac won't sleep mid-download.
+
+### Viewer
+
+```bash
+cd helpers/course_viewer
+npm install          # first time only
+npm run dev          # opens http://localhost:5173 (or next free port)
+```
+
+Vite serves everything directly from `~/Music/dj-tools/course/` as static assets — no
+server, no network requests during playback. Video position and lesson completion state
+are saved to `localStorage`.
+
+### Moving course files to an external SSD
+
+The course directory is ~30 GB. To move it off the boot drive:
+
+```bash
+# 1. Move the files to the SSD (substitute your actual mount point)
+mv ~/Music/dj-tools/course /Volumes/YourSSD/dj-course
+
+# 2. Symlink the original path to the new location
+ln -s /Volumes/YourSSD/dj-course ~/Music/dj-tools/course
+```
+
+The symlink is transparent to Vite, the downloader, and `paths.py` — nothing else needs
+to change. Make sure the SSD is mounted before starting the viewer or running the
+downloader.
+
+---
+
 ## Tests
 
 ```bash
@@ -572,8 +707,10 @@ detect/                         Track detection + enrichment pipeline (Stages 2-
                                 no DJ Studio filesystem writes)
   export_to_rekordbox.py        Stage 6a: pending → rekordbox playlist (idempotent)
   import_rekordbox_analysis.py  Stage 6b: ingest PSSI + cues from ANLZ files
-  instagram.py / mixcloud.py / youtube.py / radio.py / podbean.py / reddit.py
-                                Stage 2: per-platform Shazam capture
+  instagram.py / mixcloud.py / youtube.py / soundcloud.py / radio.py /
+  podbean.py / reddit.py / topdjmixes.py
+                                Stage 2: per-platform capture (Shazam for audio
+                                sources, paste-into-vi for reddit / topdjmixes)
   shazam.py / parser.py         Audio recognition + tracklist parsing
 
 sync/                           Stage 1: Apple Music → Beatport
@@ -593,5 +730,7 @@ rekordbox/                      Rekordbox writes via pyrekordbox
   backup.py                     master.db backup
   constants.py                  Path discovery + Camelot/cue-kind constants
 
-helpers/                        Standalone maintenance scripts
+helpers/                        Standalone maintenance scripts + course tools
+  download_course.py            Course downloader (browser scrape + Dyntube/Circle HLS)
+  course_viewer/                Vite + React viewer — serves ~/Music/dj-tools/course/ locally
 ```
