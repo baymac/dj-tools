@@ -737,6 +737,16 @@ async def _extract_quiz(page, lesson: Lesson) -> None:
     """Brute-force discover correct answers for a Circle quiz, save to quizzes/<id>.json."""
     QUIZZES_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Already extracted — skip brute-force. The answers are on disk and the
+    # lesson may already be complete on Circle's backend from the previous run.
+    # Re-reading signals here lets the caller's completion-click logic detect
+    # the current state (disabled button = auto-completed, "Completed" = done).
+    quiz_out = QUIZZES_DIR / f"{lesson.id}.json"
+    if quiz_out.exists():
+        lesson.quiz_file = f"quizzes/{lesson.id}.json"
+        print(f"    quiz: already extracted — skipping brute-force")
+        return
+
     # Reset to a fresh quiz state if we previously passed/failed
     state = await _quiz_state(page)
     if state in ("passed", "failed"):
