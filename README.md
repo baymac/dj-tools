@@ -563,21 +563,70 @@ All course data lives under `~/Music/dj-tools/course/` (or an SSD — see below)
 
 ### Downloader
 
+#### `login`
+
 ```bash
-# First-time auth — opens a headed browser; sign in manually; session is saved
 uv run helpers/download_course.py login <course_url>
-
-# Download all lessons (resumes from where it left off)
-uv run helpers/download_course.py download <course_url>
-
-# Flags
-#   --limit N            stop after N lessons (useful for testing)
-#   --dry-run            discover + print lessons without downloading
-#   --lesson-ids ID,...  force re-scrape specific lessons by ID, bypassing cache
-#                        (use after fixing a scraper bug or recovering a failed video)
 ```
 
-Output layout under `~/Music/dj-tools/course/`:
+Opens a headed (visible) browser window. Sign in manually. The session is saved
+to a persistent browser profile at `~/Music/dj-tools/state/course-browser-profile/`
+and reused by every subsequent `download` run — you only need to `login` once (or
+after your session expires).
+
+#### `download`
+
+```bash
+uv run helpers/download_course.py download <course_url> [flags]
+```
+
+Resumes from where it left off. For each lesson in course order it: navigates,
+classifies the page type, extracts content (video, quiz, HTML, attachments),
+clicks "Complete lesson" to unlock the next, and writes the manifest after each
+lesson so progress survives interruption.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit N` | all | Stop after processing N lessons. The full manifest is still written for all discovered lessons; only the first N are actively scraped. Useful for smoke-testing after a code change. |
+| `--dry-run` | off | Discover and print all lessons (title, ID, type, status) without downloading anything. No browser navigation, no file writes. |
+| `--lesson-ids ID1,ID2,...` | all | Re-scrape only the listed lesson IDs, bypassing the normal "already complete" skip. Implies `force=True` for those lessons — quizzes are re-brute-forced from scratch even if `quizzes/<id>.json` already exists. Use after fixing a scraper bug, recovering a failed video, or re-running timed-out quizzes. |
+
+**Skip logic** — a lesson is skipped (cached) unless `--lesson-ids` targets it:
+- `extracted=True` AND `completed=True` AND video file present (or lesson has no video) → skip
+- Otherwise → process
+
+**Lesson types extracted:**
+
+| Type | Description |
+|------|-------------|
+| `video_circle` | Circle-native HLS video: m3u8 captured via network sniffer, segments downloaded, muxed to mp4 |
+| `video_dyntube` | Dyntube iframe video: AES-128 HLS key captured, manifest rewritten to local key URI, then downloaded |
+| `quiz` | Multiple-choice quiz: brute-forced to find correct answers, saved to `quizzes/<id>.json` |
+| `exercise` | Written exercise / assignment — HTML prose only, no video |
+| `guide` | Reference / guide page — HTML prose only |
+| `content` | Generic content page — HTML prose only |
+| `locked` | Not yet unlocked on the platform (prior lesson incomplete) |
+| `unknown` | Scraper couldn't classify the page (usually means it wasn't reached) |
+
+**Common re-scrape recipes:**
+
+```bash
+# Re-run a single failed quiz
+uv run helpers/download_course.py download <course_url> --lesson-ids 2569067
+
+# Re-run several timed-out quizzes at once
+uv run helpers/download_course.py download <course_url> --lesson-ids 2503039,2556782,2562957,2569067
+
+# Re-scrape unknown/unextracted lessons
+uv run helpers/download_course.py download <course_url> --lesson-ids 2623038,943070,943071
+
+# Test the first 5 lessons only
+uv run helpers/download_course.py download <course_url> --limit 5 --dry-run
+```
+
+**Output layout** under `~/Music/dj-tools/course/`:
 
 ```
 lessons.json        full manifest — one entry per lesson
@@ -589,7 +638,7 @@ thumbs/             video poster frames
 subtitles/          VTT subtitle files
 _keys/              captured AES-128 keys for Dyntube HLS videos
 _hls/               rewritten m3u8 manifests (local key URIs)
-failed.json         lessons that failed during the last run
+failed.json         lessons that errored or timed out during the last run
 ```
 
 Logs are written automatically to `~/Music/dj-tools/logs/download-course/YYYY-MM-DD_HHMMSS.log`.
