@@ -1274,6 +1274,37 @@ def _write_manifest(lessons: list[Lesson]) -> None:
     )
 
 
+def _update_courses_index(course_dir: Path, course_name: str, lesson_count: int) -> None:
+    """Keep ~/Music/dj-tools/courses.json in sync with downloaded courses.
+
+    Only runs when course_dir is a direct child of DJ_TOOLS_DIR so the viewer
+    can serve it via publicDir = DJ_TOOLS_DIR.
+    """
+    from paths import DJ_TOOLS_DIR  # noqa: PLC0415
+    try:
+        if course_dir.parent.resolve() != Path(DJ_TOOLS_DIR).resolve():
+            return
+        course_id = course_dir.name
+        index_path = Path(DJ_TOOLS_DIR) / "courses.json"
+        entries: list[dict] = []
+        if index_path.exists():
+            try:
+                entries = json.loads(index_path.read_text(encoding="utf-8"))
+            except Exception:
+                entries = []
+        # Update or insert this course
+        for e in entries:
+            if e.get("id") == course_id:
+                e["name"] = course_name
+                e["lessonCount"] = lesson_count
+                break
+        else:
+            entries.append({"id": course_id, "name": course_name, "lessonCount": lesson_count})
+        index_path.write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        print(f"  courses.json update skipped: {exc}")
+
+
 # ---------- walker (per-lesson processing) ----------
 
 async def _click_and_verify_complete(page) -> bool:
@@ -1584,7 +1615,7 @@ async def _refresh_cookies_file(ctx) -> str:
     return tmp.name
 
 
-async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bool = False, lesson_ids: Optional[set] = None) -> None:
+async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bool = False, lesson_ids: Optional[set] = None, course_name: Optional[str] = None) -> None:
     for d in (VIDEOS_DIR, IMAGES_DIR, FILES_DIR, QUIZZES_DIR, THUMBS_DIR, SUBS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -1602,6 +1633,13 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
             print("Not logged in — run: uv run helpers/download_course.py login <url>")
             sys.exit(1)
         print("Discovering lessons…")
+        if not course_name:
+            try:
+                course_name = await page.evaluate(
+                    "() => document.querySelector('h1')?.innerText?.trim() || document.title || ''"
+                )
+            except Exception:
+                pass
         lessons = await _scrape_lesson_list(page, course_url)
         print(f"  found {len(lessons)} lessons")
         await page.close()
@@ -1800,6 +1838,8 @@ async def cmd_download(course_url: str, limit: Optional[int] = None, dry_run: bo
     _write_manifest(lessons)
     print(f"\nManifest: {MANIFEST_FILE} ({len(lessons)} lessons)")
     print(f"Data: {COURSE_DIR}")
+    if course_name:
+        _update_courses_index(MANIFEST_FILE.parent, course_name, len(lessons))
 
 
 def main() -> None:
@@ -1812,6 +1852,7 @@ def main() -> None:
     dry_run = False
     lesson_ids = None
     out_dir = None
+    course_name = None
     i = 0
     while i < len(extra):
         if extra[i] == "--limit" and i + 1 < len(extra):
@@ -1822,6 +1863,8 @@ def main() -> None:
             lesson_ids = set(extra[i + 1].split(",")); i += 2
         elif extra[i] == "--out-dir" and i + 1 < len(extra):
             out_dir = Path(extra[i + 1]).expanduser().resolve(); i += 2
+        elif extra[i] == "--course-name" and i + 1 < len(extra):
+            course_name = extra[i + 1]; i += 2
         else:
             print(f"Unknown arg: {extra[i]}"); sys.exit(1)
 
@@ -1839,7 +1882,7 @@ def main() -> None:
             print(f"Output: {out_dir}")
         try:
             with caffeinate():
-                asyncio.run(cmd_download(url, limit=limit, dry_run=dry_run, lesson_ids=lesson_ids))
+                asyncio.run(cmd_download(url, limit=limit, dry_run=dry_run, lesson_ids=lesson_ids, course_name=course_name))
         finally:
             sys.stdout = orig_stdout
             log_fh.close()

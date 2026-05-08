@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from '@tanstack/react-router'
-import { getLessonById, getAdjacentLessons } from '../lessonsStore'
+import { getLessonById, getAdjacentLessons, assetUrl, coursePrefix } from '../lessonsStore'
 import { QuizView } from './QuizView'
 
 function setCompletedStorage(id: string, value: boolean) {
@@ -48,7 +48,7 @@ function cleanContentHtml(raw: string): string {
 }
 
 export function LessonView() {
-  const { lessonId } = useParams({ from: '/lesson/$lessonId' })
+  const { lessonId } = useParams({ from: '/$courseId/lesson/$lessonId' })
   const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
   const [completed, setCompleted] = useState(false)
@@ -84,11 +84,11 @@ export function LessonView() {
   }
 
   const goNext = () => {
-    if (next) navigate({ to: '/lesson/$lessonId', params: { lessonId: next.id } })
+    if (next) navigate({ to: '/$courseId/lesson/$lessonId', params: { courseId: coursePrefix, lessonId: next.id } })
   }
 
   const goPrev = () => {
-    if (prev) navigate({ to: '/lesson/$lessonId', params: { lessonId: prev.id } })
+    if (prev) navigate({ to: '/$courseId/lesson/$lessonId', params: { courseId: coursePrefix, lessonId: prev.id } })
   }
 
   if (!lesson) {
@@ -110,14 +110,14 @@ export function LessonView() {
             className="w-full"
             onTimeUpdate={handleTimeUpdate}
             onEnded={handleComplete}
-            src={`/${lesson.videoFile}`}
-            poster={lesson.thumbFile ? `/${lesson.thumbFile}` : undefined}
+            src={assetUrl(lesson.videoFile)}
+            poster={lesson.thumbFile ? assetUrl(lesson.thumbFile) : undefined}
           >
             {(lesson.subtitles || []).map((sub, i) => (
               <track
                 key={i}
                 kind="subtitles"
-                src={`/${sub.file}`}
+                src={assetUrl(sub.file)}
                 srcLang={sub.lang || 'en'}
                 label={sub.label}
                 default={sub.default}
@@ -255,7 +255,7 @@ export function LessonView() {
                   )}
                 </div>
                 <a
-                  href={`/${att.file}`}
+                  href={assetUrl(att.file)}
                   download={att.name}
                   className="ml-4 flex-shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-full text-xs text-blue-400 border border-blue-900/60 hover:bg-blue-950/40 transition-colors"
                 >

@@ -1,6 +1,13 @@
 import { useMemo, useState } from 'react'
-import { Link, useParams } from '@tanstack/react-router'
+import { Link, useNavigate, useParams } from '@tanstack/react-router'
 import type { Lesson, Section, LessonType } from '../types'
+import {
+  courseName,
+  coursePrefix,
+  availableCourses,
+  lessons,
+  loadLessons,
+} from '../lessonsStore'
 
 interface Props {
   sections: Section[]
@@ -46,8 +53,8 @@ function LessonRow({ lesson, currentId, sectionTitle }: { lesson: Lesson; curren
   return (
     <Link
       key={lesson.id}
-      to="/lesson/$lessonId"
-      params={{ lessonId: lesson.id }}
+      to="/$courseId/lesson/$lessonId"
+      params={{ courseId: coursePrefix, lessonId: lesson.id }}
       className={`flex items-start px-4 py-2.5 text-sm border-l-2 hover:bg-gray-800/60 transition-colors ${
         lesson.id === currentId
           ? 'border-blue-500 bg-gray-800 text-white'
@@ -73,6 +80,7 @@ function LessonRow({ lesson, currentId, sectionTitle }: { lesson: Lesson; curren
 export function Sidebar({ sections }: Props) {
   const params = useParams({ strict: false }) as { lessonId?: string }
   const currentId = params.lessonId
+  const navigate = useNavigate()
 
   const [collapsed, setCollapsed] = useState<Record<number, boolean>>({})
   const [query, setQuery] = useState('')
@@ -94,12 +102,36 @@ export function Sidebar({ sections }: Props) {
     )
   }, [query, sections])
 
+  const handleCourseSwitch = async (courseId: string) => {
+    if (courseId === coursePrefix) return
+    const course = availableCourses.find(c => c.id === courseId)
+    if (!course) return
+    await loadLessons(course.id, course.name)
+    localStorage.setItem('selectedCourse', course.id)
+    navigate({
+      to: '/$courseId/lesson/$lessonId',
+      params: { courseId: course.id, lessonId: lessons[0].id },
+    })
+  }
+
   return (
     <aside className="w-96 bg-gray-900 border-r border-gray-800 flex flex-col flex-shrink-0 overflow-hidden">
       {/* Header */}
       <div className="p-4 border-b border-gray-800">
-        <h1 className="font-semibold text-white text-sm">Pete Tong DJ Academy</h1>
-        <p className="text-xs text-gray-500 mt-1">
+        {availableCourses.length > 1 ? (
+          <select
+            value={coursePrefix}
+            onChange={e => handleCourseSwitch(e.target.value)}
+            className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-sm font-semibold text-white focus:outline-none focus:border-gray-500 cursor-pointer"
+          >
+            {availableCourses.map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        ) : (
+          <h1 className="font-semibold text-white text-sm leading-snug">{courseName || 'DJ Academy'}</h1>
+        )}
+        <p className="text-xs text-gray-500 mt-2">
           {completedCount}/{totalLessons} lessons
         </p>
         <div className="mt-2 h-1 bg-gray-800 rounded-full overflow-hidden">

@@ -1,13 +1,40 @@
 import type { Lesson, Section } from './types'
 
-export let lessons: Lesson[] = []
+export interface CourseEntry {
+  id: string
+  name: string
+  lessonCount: number
+}
 
-export async function loadLessons(): Promise<void> {
-  const res = await fetch('/lessons.json')
+export let availableCourses: CourseEntry[] = []
+export let lessons: Lesson[] = []
+export let coursePrefix = ''
+export let courseName = ''
+
+export function assetUrl(path: string): string {
+  if (!path) return path
+  return `/${coursePrefix}/${path}`
+}
+
+export async function loadCourses(): Promise<CourseEntry[]> {
+  try {
+    const res = await fetch('/courses.json')
+    if (res.ok) {
+      availableCourses = await res.json()
+      return availableCourses
+    }
+  } catch {}
+  return []
+}
+
+export async function loadLessons(courseId: string, name: string): Promise<void> {
+  coursePrefix = courseId
+  courseName = name
+  const res = await fetch(`/${courseId}/lessons.json`)
   if (!res.ok) {
     throw new Error(
       `lessons.json not found (${res.status}). Run the scraper first:\n` +
-      `  uv run helpers/download_course.py download <course_url>`
+      `  uv run helpers/download_course.py download <course_url> --out-dir ~/Music/dj-tools/${courseId}`
     )
   }
   lessons = await res.json()

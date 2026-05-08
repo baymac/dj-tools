@@ -1,7 +1,13 @@
 import { createRootRoute, createRoute, createRouter, redirect } from '@tanstack/react-router'
 import { Root } from './components/Root'
 import { LessonView } from './components/LessonView'
-import { getLessonById, lessons } from './lessonsStore'
+import {
+  getLessonById,
+  loadLessons,
+  lessons,
+  coursePrefix,
+  availableCourses,
+} from './lessonsStore'
 
 export const rootRoute = createRootRoute({
   component: Root,
@@ -11,10 +17,10 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   beforeLoad: () => {
-    if (lessons.length > 0) {
+    if (lessons.length > 0 && coursePrefix) {
       throw redirect({
-        to: '/lesson/$lessonId',
-        params: { lessonId: lessons[0].id },
+        to: '/$courseId/lesson/$lessonId',
+        params: { courseId: coursePrefix, lessonId: lessons[0].id },
       })
     }
   },
@@ -27,8 +33,15 @@ const indexRoute = createRoute({
 
 export const lessonRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/lesson/$lessonId',
-  loader: ({ params }) => {
+  path: '/$courseId/lesson/$lessonId',
+  loader: async ({ params }) => {
+    if (params.courseId !== coursePrefix) {
+      const course = availableCourses.find(c => c.id === params.courseId)
+      if (course) {
+        await loadLessons(course.id, course.name)
+        localStorage.setItem('selectedCourse', course.id)
+      }
+    }
     const lesson = getLessonById(params.lessonId)
     if (!lesson) throw new Error(`Lesson not found: ${params.lessonId}`)
     return lesson

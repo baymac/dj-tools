@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { assetUrl } from '../lessonsStore'
 
 interface QuizOption {
   id: string
@@ -33,7 +34,7 @@ export function QuizView({ quizFile }: Props) {
 
   useEffect(() => {
     setQuiz(null); setError(''); setSelectedByQuestion({}); setSubmitted(false)
-    fetch(`/${quizFile}`)
+    fetch(assetUrl(quizFile))
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then((q: QuizData) => setQuiz(q))
       .catch(e => setError(String(e)))
@@ -70,7 +71,7 @@ export function QuizView({ quizFile }: Props) {
             </div>
             <h3 className="text-lg font-semibold text-white mb-4">{q.text}</h3>
             {q.image && (
-              <img src={`/${q.image}`} alt="" className="rounded-lg max-w-md mb-4 border border-gray-800" />
+              <img src={assetUrl(q.image)} alt="" className="rounded-lg max-w-md mb-4 border border-gray-800" />
             )}
             <ul className="space-y-2">
               {q.options.map((opt, oIdx) => {
