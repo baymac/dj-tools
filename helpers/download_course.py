@@ -1487,6 +1487,23 @@ async def _process_lesson(ctx, lesson: Lesson) -> None:
         cb = signals.get("complete_button") or {}
         cb_text = (cb.get("text") or "").strip().lower()
         if cb_text == "complete lesson":
+            # After a quiz is passed Circle temporarily disables the "Complete lesson"
+            # button while it processes the result. Wait up to 20s for it to re-enable
+            # before attempting the click.
+            if lesson.type == LessonType.QUIZ.value:
+                try:
+                    await page.wait_for_function(
+                        """() => {
+                            for (const b of document.querySelectorAll('button[type="submit"]')) {
+                                if ((b.textContent || '').trim().toLowerCase() === 'complete lesson' && !b.disabled)
+                                    return true;
+                            }
+                            return false;
+                        }""",
+                        timeout=20000,
+                    )
+                except Exception:
+                    pass  # timed out — attempt the click anyway
             try:
                 await page.click(
                     'button[type="submit"]:has-text("Complete lesson")',
