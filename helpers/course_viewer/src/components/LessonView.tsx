@@ -196,6 +196,29 @@ export function LessonView() {
         </div>
       )}
 
+      {/* Pending-content banners — shown when the scraper hasn't extracted this lesson yet */}
+      {lesson.type === 'locked' && (
+        <div className="mt-8 rounded-xl bg-gray-800/50 border border-gray-700 px-5 py-4 text-sm text-gray-400">
+          <p className="font-medium text-gray-300 mb-1">Lesson locked on the platform</p>
+          <p>This lesson was still locked when the course was downloaded. Re-run the downloader after completing earlier lessons to unlock it.</p>
+          <p className="mt-2 font-mono text-xs text-gray-500">uv run helpers/download_course.py download &lt;course_url&gt; --lesson-ids {lesson.id}</p>
+        </div>
+      )}
+      {lesson.type === 'unknown' && !cleanedHtml && (
+        <div className="mt-8 rounded-xl bg-gray-800/50 border border-gray-700 px-5 py-4 text-sm text-gray-400">
+          <p className="font-medium text-gray-300 mb-1">Content not yet downloaded</p>
+          <p>This lesson wasn't fully scraped. Re-run the downloader to fetch it.</p>
+          <p className="mt-2 font-mono text-xs text-gray-500">uv run helpers/download_course.py download &lt;course_url&gt; --lesson-ids {lesson.id}</p>
+        </div>
+      )}
+      {lesson.type === 'quiz' && !lesson.quizFile && (
+        <div className="mt-8 rounded-xl bg-amber-950/30 border border-amber-900/60 px-5 py-4 text-sm text-gray-400">
+          <p className="font-medium text-amber-300 mb-1">Quiz not yet extracted</p>
+          <p>The quiz questions timed out during download. Re-run the downloader to fetch this quiz.</p>
+          <p className="mt-2 font-mono text-xs text-gray-500">uv run helpers/download_course.py download &lt;course_url&gt; --lesson-ids {lesson.id}</p>
+        </div>
+      )}
+
       {/* Content (cleaned: prose only, no duplicate header or embedded player) */}
       {lesson.type !== 'quiz' && cleanedHtml && (
         <div

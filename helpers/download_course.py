@@ -1220,7 +1220,10 @@ async def _download_attachments(lesson: Lesson) -> None:
             if not url or not url.startswith("http"):
                 final.append(att)
                 continue
-            raw_name = att.name or url.split("/")[-1].split("?")[0] or "file"
+            # Strip trailing file-size suffix that Circle merges into link text with
+            # no separator (e.g. "beatport chart.pdf905.52 KB" → "beatport chart.pdf").
+            cleaned = re.sub(r'\d[\d.,]*\s*(?:B|KB|MB|GB)\s*$', '', att.name or '', flags=re.IGNORECASE).strip()
+            raw_name = cleaned or url.split("/")[-1].split("?")[0] or "file"
             ext_m = re.search(r'(\.[a-zA-Z0-9]{2,5})(?:\?.*)?$', url)
             ext = ext_m.group(1).lower() if ext_m else ""
             safe = _sanitize(raw_name.rsplit(".", 1)[0]) + (ext or "")
