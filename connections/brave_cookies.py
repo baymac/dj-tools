@@ -140,7 +140,7 @@ def read_cookies_for_domain(domain_substring: str) -> list[dict]:
     if not _COOKIES_DB.exists():
         raise RuntimeError(
             f"Brave cookie store not found at {_COOKIES_DB}. Is Brave installed and "
-            "have you logged into SoundCloud in it at least once?"
+            f"have you logged into {domain_substring} in it at least once?"
         )
 
     password = _get_keychain_password()

@@ -4,7 +4,25 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
+
+_YTDLP = [sys.executable, "-m", "yt_dlp"]
+_REMOTE = ["--remote-components", "ejs:github"]
+_COOKIES_FILE = Path.home() / "Music/dj-tools/state/yt_cookies.txt"
+_COOKIES_TTL = 7 * 24 * 3600  # refresh from Brave once a week
+
+
+def _cookie_args() -> list[str]:
+    """Return yt-dlp cookie flags, using a cached Netscape file when fresh."""
+    if _COOKIES_FILE.exists():
+        age = time.time() - _COOKIES_FILE.stat().st_mtime
+        if age < _COOKIES_TTL:
+            return ["--cookies", str(_COOKIES_FILE)]
+    # First run or stale cache — extract from Brave and write to file.
+    _COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    return ["--cookies-from-browser", "brave", "--cookies", str(_COOKIES_FILE)]
 
 
 def resolve_video(url: str) -> tuple[str, str, int]:
@@ -12,7 +30,7 @@ def resolve_video(url: str) -> tuple[str, str, int]:
 
     Raises RuntimeError if yt-dlp is missing or the URL is unresolvable.
     """
-    cmd = ["yt-dlp", "--dump-json", "--no-playlist", url]
+    cmd = [*_YTDLP, "--dump-json", "--no-playlist", *_cookie_args(), *_REMOTE, url]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
@@ -36,7 +54,9 @@ def download_video(url: str, dest_dir: str) -> Path:
     """
     out_template = str(Path(dest_dir) / "video.%(ext)s")
     cmd = [
-        "yt-dlp", "--no-playlist",
+        *_YTDLP, "--no-playlist",
+        *_cookie_args(), *_REMOTE,
+        "-f", "bestaudio/best",
         "-x", "--audio-format", "mp3", "--audio-quality", "2",
         "-o", out_template,
         url,

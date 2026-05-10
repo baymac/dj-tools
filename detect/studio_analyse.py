@@ -205,6 +205,7 @@ def _run_studio_analyse_impl(
         if not isinstance(res, dict):
             return False
         haystack_parts.append(str(res.get("bp_state") or ""))
+        haystack_parts.append(str(res.get("message") or ""))
         ep = res.get("error_props") or {}
         if isinstance(ep, dict):
             for v in ep.values():
@@ -216,6 +217,7 @@ def _run_studio_analyse_impl(
             "token expired", "token_expired", "expired token",
             "signature is invalid", "invalid signature",
             "authfailed", "authentication", "not authorized", "not authorised",
+            "loginrequired", "login required",
         )
         return any(m in haystack for m in markers)
 

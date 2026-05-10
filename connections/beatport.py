@@ -161,6 +161,141 @@ async def _capture_session_cookie_async(
 
 
 
+_BEATPORT_SESSION_COOKIE_NAME = "__Secure-next-auth.session-token"
+
+
+_CDP_PORT_DEFAULT = 9222
+_CDP_BASE_DEFAULT = f"http://127.0.0.1:{_CDP_PORT_DEFAULT}"
+
+
+def _cdp_endpoint_alive(base_url: str) -> bool:
+    try:
+        r = httpx.get(f"{base_url}/json/version", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _fetch_session_via_cdp(cdp_url: str) -> tuple[dict, str, str]:
+    """Drive the user's already-running Brave (via CDP) to fetch /api/auth/session.
+
+    Brave's `cf_clearance` is bound to Brave's actual TLS fingerprint. By
+    connecting Playwright over CDP we run the request *inside* Brave itself —
+    same TLS, same cookies, same everything Cloudflare whitelisted. Returns
+    (json_data, current_session_cookie, current_cf_clearance) so the caller
+    can persist any rotations.
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        try:
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            # Reuse an existing beatport tab if one is open; otherwise pop a new one.
+            page = next(
+                (pg for pg in context.pages if "beatport.com" in (pg.url or "")),
+                None,
+            )
+            if page is None:
+                page = await context.new_page()
+                await page.goto("https://www.beatport.com/", wait_until="domcontentloaded", timeout=30_000)
+                try:
+                    await page.wait_for_function(
+                        "() => !document.title.includes('Just a moment')",
+                        timeout=15_000,
+                    )
+                except Exception:
+                    pass
+
+            fetch_result = await page.evaluate(
+                """async () => {
+                    try {
+                        const r = await fetch('/api/auth/session', {
+                            credentials: 'include',
+                            headers: { 'accept': 'application/json' },
+                        });
+                        const text = await r.text();
+                        return { ok: r.ok, status: r.status, body: text };
+                    } catch (e) {
+                        return { ok: false, status: 0, body: String(e) };
+                    }
+                }"""
+            )
+            if not fetch_result.get("ok"):
+                raise RuntimeError(
+                    f"In-Brave fetch /api/auth/session returned HTTP "
+                    f"{fetch_result.get('status')} (body head={fetch_result.get('body', '')[:200]!r})"
+                )
+            body = fetch_result.get("body", "")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"NextAuth /api/auth/session returned non-JSON body "
+                    f"(head={body[:200]!r}): {exc}"
+                )
+
+            session_cookie = ""
+            cf_clear = ""
+            for c in await context.cookies("https://www.beatport.com"):
+                if c.get("name") == _BEATPORT_SESSION_COOKIE_NAME:
+                    session_cookie = c.get("value", "")
+                elif c.get("name") == "cf_clearance":
+                    cf_clear = c.get("value", "")
+            return data, session_cookie, cf_clear
+        finally:
+            # Don't close the browser — it's the user's. Just disconnect.
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+
+def capture_session_via_cdp(cdp_url: Optional[str] = None) -> str:
+    """Attach to running Brave via CDP and capture the access token directly.
+
+    Brave must be launched with `--remote-debugging-port=9222` (quit Brave
+    first, then run from a new terminal):
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \\
+          --remote-debugging-port=9222
+
+    The user must already be signed in to beatport.com in that Brave window.
+    """
+    base = cdp_url or _CDP_BASE_DEFAULT
+    if not _cdp_endpoint_alive(base):
+        raise RuntimeError(
+            f"No CDP endpoint at {base}. Quit Brave, then in a new terminal run:\n\n"
+            f'  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" '
+            f"--remote-debugging-port={_CDP_PORT_DEFAULT}\n\n"
+            "Sign in to beatport.com in that Brave window, then re-run this command."
+        )
+
+    data, session_cookie, cf_clear = asyncio.run(_fetch_session_via_cdp(base))
+
+    token_data = data.get("token") or {}
+    err = token_data.get("error")
+    if err:
+        raise RuntimeError(
+            f"NextAuth returned token.error={err!r}. Sign out and back in to "
+            "beatport.com in Brave, then re-run."
+        )
+    access = token_data.get("accessToken")
+    if not access:
+        raise RuntimeError(
+            f"No accessToken in /api/auth/session response (token keys={list(token_data.keys())})"
+        )
+    bearer = f"Bearer {access}"
+    if _jwt_payload(bearer).get("exp", 0) <= time.time():
+        raise RuntimeError("accessToken returned but already expired by JWT exp.")
+
+    if session_cookie:
+        save_token_to_env(bearer, session_cookie)
+    else:
+        save_token_to_env(bearer)
+    if cf_clear:
+        save_cf_clearance_to_env(cf_clear)
+    return bearer
+
+
+
 def capture_token(username: Optional[str] = None, password: Optional[str] = None, headless: bool = True) -> tuple[str, str]:
     """Browser login → (access_token, session_cookie).
 
@@ -202,14 +337,18 @@ _NEXTAUTH_SESSION_URL = "https://www.beatport.com/api/auth/session"
 def refresh_via_session(session_cookie: str, *, verbose: bool = False) -> Optional[str]:
     """Refresh the Beatport access token using the NextAuth session cookie.
 
-    Calls /api/auth/session with the __Secure-next-auth.session-token cookie.
-    NextAuth uses the embedded refresh token server-side and returns a new accessToken.
-    NextAuth ALSO rotates the session cookie on every refresh — if a new cookie comes
-    back in Set-Cookie, we persist it to .env so the next refresh works. Otherwise
-    the next call would use a stale cookie and fail.
+    Sends the __Secure-next-auth.session-token cookie (and BEATPORT_CF_CLEARANCE
+    if present) to /api/auth/session via curl_cffi's Chrome 131 TLS impersonation.
+    Plain httpx (urllib3 fingerprint) gets blocked by Cloudflare on /api/* routes
+    even with a valid cf_clearance, because cf_clearance is bound to the
+    originating client's JA3/JA4 — only a real-Chrome handshake satisfies it.
 
-    Returns 'Bearer <new_token>' or None if refresh failed or returned an expired token.
-    Set verbose=True (or BEATPORT_DEBUG=1 in the env) to print the real cause to stderr.
+    NextAuth rotates the session cookie on every refresh; we persist any new
+    Set-Cookie value so the next call works. cf_clearance also rotates
+    occasionally — we persist that too.
+
+    Returns 'Bearer <new_token>' or None on failure. verbose=True (or
+    BEATPORT_DEBUG=1) prints the real cause to stderr.
     """
     import os
     if os.environ.get("BEATPORT_DEBUG"):
@@ -219,35 +358,50 @@ def refresh_via_session(session_cookie: str, *, verbose: bool = False) -> Option
         if verbose:
             print(f"[refresh_via_session] {msg}", file=sys.stderr)
 
+    from curl_cffi import requests as cffi_requests
+
+    cookies: dict[str, str] = {_BEATPORT_SESSION_COOKIE_NAME: session_cookie}
+    cf_clear = os.environ.get("BEATPORT_CF_CLEARANCE", "").strip()
+    if cf_clear:
+        cookies["cf_clearance"] = cf_clear
+
+    _why(f"sending {len(cookies)} cookie(s): {sorted(cookies.keys())}")
+
     try:
-        r = httpx.get(
+        r = cffi_requests.get(
             _NEXTAUTH_SESSION_URL,
+            cookies=cookies,
             headers={
-                "cookie": f"__Secure-next-auth.session-token={session_cookie}",
+                "accept": "application/json, text/plain, */*",
                 "user-agent": USER_AGENT,
+                "referer": "https://www.beatport.com/",
+                "origin": "https://www.beatport.com",
             },
-            timeout=15,
-            follow_redirects=True,
+            impersonate="chrome131",
+            timeout=30,
         )
     except Exception as e:
         _why(f"HTTP request failed: {type(e).__name__}: {e}")
         return None
 
     if r.status_code != 200:
-        _why(f"HTTP {r.status_code}: {r.text[:200]!r}")
+        _why(f"HTTP {r.status_code}: {(r.text or '')[:200]!r}")
+        if r.status_code == 403 and not cf_clear:
+            _why("403 with no cf_clearance in env — run `dj login-beatport --cdp` "
+                 "to pull a fresh cf_clearance from Brave.")
         return None
 
     try:
         data = r.json()
     except Exception as e:
-        _why(f"JSON parse failed: {e}; body head={r.text[:200]!r}")
+        _why(f"JSON parse failed: {e}; body head={(r.text or '')[:200]!r}")
         return None
 
     token_data = data.get("token") or {}
     err = token_data.get("error")
     if err:
         _why(f"NextAuth returned token.error={err!r} — server-side refresh chain is broken. "
-             f"Wipe ~/Music/dj-tools/state/browser-profile/ and re-run `dj login-beatport --ui`.")
+             f"Re-run `dj login-beatport --brave`.")
         return None
 
     new_token = token_data.get("accessToken")
@@ -260,25 +414,57 @@ def refresh_via_session(session_cookie: str, *, verbose: bool = False) -> Option
         _why("accessToken returned but already expired by JWT exp")
         return None
 
-    rotated_cookie = r.cookies.get("__Secure-next-auth.session-token")
-    if rotated_cookie and rotated_cookie != session_cookie:
-        save_token_to_env(bearer, rotated_cookie)
+    # Persist rotations.
+    try:
+        rotated_session = r.cookies.get(_BEATPORT_SESSION_COOKIE_NAME) or ""
+    except Exception:
+        rotated_session = ""
+    try:
+        rotated_cf = r.cookies.get("cf_clearance") or ""
+    except Exception:
+        rotated_cf = ""
+
+    if rotated_session and rotated_session != session_cookie:
+        save_token_to_env(bearer, rotated_session)
     else:
         save_token_to_env(bearer)
+    if rotated_cf and rotated_cf != cf_clear:
+        save_cf_clearance_to_env(rotated_cf)
+
     return bearer
 
 
-def save_token_to_env(token: str, session_cookie: Optional[str] = None) -> None:
-    """Persist token (and optionally session cookie) back to .env."""
+
+def _set_env_key(key: str, value: str) -> None:
     try:
         from dotenv import set_key
         env_path = __import__("pathlib").Path(__file__).resolve().parent.parent / ".env"
         if env_path.exists():
-            set_key(str(env_path), "BEATPORT_ACCESS_TOKEN", token.removeprefix("Bearer ").strip())
-            if session_cookie:
-                set_key(str(env_path), "BEATPORT_SESSION_TOKEN", session_cookie)
+            set_key(str(env_path), key, value)
     except Exception:
         pass
+
+
+def save_token_to_env(token: str, session_cookie: Optional[str] = None) -> None:
+    """Persist token (and optionally session cookie) back to .env."""
+    _set_env_key("BEATPORT_ACCESS_TOKEN", token.removeprefix("Bearer ").strip())
+    if session_cookie:
+        _set_env_key("BEATPORT_SESSION_TOKEN", session_cookie)
+
+
+def save_session_cookie_to_env(session_cookie: str) -> None:
+    """Persist just the NextAuth session cookie."""
+    if session_cookie:
+        _set_env_key("BEATPORT_SESSION_TOKEN", session_cookie)
+
+
+def save_cf_clearance_to_env(cf_clearance: str) -> None:
+    """Persist the Cloudflare clearance cookie so /api/* refreshes survive CF."""
+    if cf_clearance:
+        _set_env_key("BEATPORT_CF_CLEARANCE", cf_clearance)
+        # Also reflect into the running process so the very next refresh uses it.
+        import os as _os
+        _os.environ["BEATPORT_CF_CLEARANCE"] = cf_clearance
 
 
 def make_client(token: str) -> httpx.Client:

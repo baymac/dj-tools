@@ -58,6 +58,10 @@ Examples:
                       help="Browser login with visible window (use if headless is blocked by Cloudflare)")
     mode.add_argument("--cookie", action="store_true",
                       help="Refresh via BEATPORT_SESSION_TOKEN cookie")
+    mode.add_argument("--cdp", action="store_true",
+                      help="Attach to running Brave via CDP (port 9222) and run the auth call from "
+                           "inside Brave itself — bypasses every Cloudflare fingerprint check. "
+                           "Requires Brave launched with --remote-debugging-port=9222.")
 
     return parser, detect_p, sync_p, playlist_p, lb_p
 
@@ -92,6 +96,16 @@ def _handle_login_beatport(args) -> None:
         token = bp_api.refresh_via_session(session_cookie)
         if not token:
             console.print("[red]Session cookie refresh failed — cookie may be expired.[/red]")
+            sys.exit(1)
+        _save_and_report(token)
+        return
+
+    if args.cdp:
+        console.print("[dim]Connecting to running Brave via CDP (localhost:9222) and fetching access token from inside Brave…[/dim]")
+        try:
+            token = bp_api.capture_session_via_cdp()
+        except RuntimeError as e:
+            console.print(f"[red]CDP login failed:[/red] {e}")
             sys.exit(1)
         _save_and_report(token)
         return
