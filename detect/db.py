@@ -166,6 +166,27 @@ def migrate() -> None:
             )
         """)
 
+        # Per-slice Shazam scan log — one row per (session, position) attempt.
+        # status: 'found' | 'duplicate' | 'not_recognized' | 'timeout' | 'error' | 'slice_failed'
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS shazam_slices (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                position        INTEGER NOT NULL,
+                status          TEXT    NOT NULL,
+                artist          TEXT,
+                title           TEXT,
+                shazam_key      TEXT,
+                apple_music_url TEXT,
+                scanned_at      TEXT    NOT NULL,
+                UNIQUE(session_id, position)
+            )
+        """)
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shazam_slices_session
+            ON shazam_slices(session_id)
+        """)
+
         # Additive migration: full Beatport catalog detail on the lean table
         # (added after enriched_tracks shipped).
         for _col, _typ in _BEATPORT_EXTRAS_COLS:
@@ -227,6 +248,30 @@ def update_session_progress(session_id: int, position: int) -> None:
         con.execute(
             "UPDATE sessions SET last_scanned_position = ? WHERE id = ?",
             (position, session_id),
+        )
+
+
+def upsert_shazam_slice(
+    session_id: int,
+    position: int,
+    status: str,
+    *,
+    artist: str | None = None,
+    title: str | None = None,
+    shazam_key: str | None = None,
+    apple_music_url: str | None = None,
+) -> None:
+    """Record one Shazam slice scan result. Safe to call multiple times for same position."""
+    with _connect() as con:
+        con.execute(
+            """INSERT INTO shazam_slices
+               (session_id, position, status, artist, title, shazam_key, apple_music_url, scanned_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_id, position) DO UPDATE SET
+                   status=excluded.status, artist=excluded.artist, title=excluded.title,
+                   shazam_key=excluded.shazam_key, apple_music_url=excluded.apple_music_url,
+                   scanned_at=excluded.scanned_at""",
+            (session_id, position, status, artist, title, shazam_key, apple_music_url, _now()),
         )
 
 

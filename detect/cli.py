@@ -46,6 +46,7 @@ from .db import (
     tracks_for_session,
     tracks_for_session_enriched,
     update_session_progress,
+    upsert_shazam_slice,
 )
 from . import db as detect_db
 from .parser import has_track_info, parse_tracks
@@ -54,6 +55,7 @@ from .topdjmixes import (
     extract_from_text as topdjmixes_extract_from_text,
     open_editor_for_post as topdjmixes_open_editor,
 )
+from .text import extract_from_text as text_extract_from_text, open_editor_for_session as text_open_editor
 from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
 
 load_dotenv()
@@ -706,6 +708,7 @@ async def _run_youtube(
                     slice_audio(str(video_path), pos, capture_s, slice_path)
                 except subprocess.CalledProcessError:
                     console.print(f"  {label} [red]slice failed[/red]")
+                    upsert_shazam_slice(session_id, pos, "slice_failed")
                     update_session_progress(session_id, pos)
                     continue
 
@@ -715,10 +718,12 @@ async def _run_youtube(
                     track = format_result(raw)
                 except asyncio.TimeoutError:
                     console.print(f"  {label} [yellow]Shazam timeout ({RECOGNIZE_TIMEOUT}s)[/yellow]")
+                    upsert_shazam_slice(session_id, pos, "timeout")
                     update_session_progress(session_id, pos)
                     continue
                 except Exception as exc:
                     console.print(f"  {label} [yellow]Shazam error: {exc}[/yellow]")
+                    upsert_shazam_slice(session_id, pos, "error")
                     update_session_progress(session_id, pos)
                     continue
 
@@ -727,11 +732,15 @@ async def _run_youtube(
 
                 if not track.get("title"):
                     console.print(f"  [dim]{label} not recognized[/dim]")
+                    upsert_shazam_slice(session_id, pos, "not_recognized")
                     continue
 
                 key = track.get("shazam_key") or f"{track.get('artist')}:{track.get('title')}"
                 if key in seen_keys:
                     console.print(f"  [dim]{label} {track['artist']} — {track['title']} (duplicate)[/dim]")
+                    upsert_shazam_slice(session_id, pos, "duplicate",
+                                        artist=track.get("artist"), title=track.get("title"),
+                                        shazam_key=track.get("shazam_key"))
                     continue
 
                 seen_keys.add(key)
@@ -740,6 +749,9 @@ async def _run_youtube(
                 total_saved += 1
                 all_tracks.append(track)
                 am = track.get("apple_music_url") or ""
+                upsert_shazam_slice(session_id, pos, "found",
+                                    artist=track.get("artist"), title=track.get("title"),
+                                    shazam_key=track.get("shazam_key"), apple_music_url=am or None)
                 console.print(
                     f"  [green bold]FOUND[/green bold]  {label}  "
                     f"[bold]{track['artist']}[/bold] — {track['title']}"
@@ -1284,6 +1296,19 @@ Examples:
     td_del_p.add_argument("session_id", type=int)
     td_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
 
+    # text
+    tx_p = sub.add_parser("text", help="Extract tracks from pasted text (no URL needed)")
+    tx_p.add_argument("name", help="Session name / label for this tracklist")
+
+    # text-history
+    tx_hist_p = sub.add_parser("text-history", help="Browse text-paste sessions")
+    tx_hist_p.add_argument("-n", "--limit", type=int, default=20)
+
+    # text-delete-session
+    tx_del_p = sub.add_parser("text-delete-session", help="Delete a text session and its tracks")
+    tx_del_p.add_argument("session_id", type=int)
+    tx_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
+
     # history
     hist_p = sub.add_parser("history", help="Show all detected tracks from every source")
     hist_p.add_argument("-n", "--limit", type=int, default=20, help="Number of tracks to show")
@@ -1421,7 +1446,7 @@ Examples:
     ira_p.add_argument("--verbose", "-v", action="store_true")
 
     # sessions
-    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit", "topdjmixes", "soundcloud")
+    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit", "topdjmixes", "soundcloud", "text")
     sess_p = sub.add_parser(
         "sessions",
         help="List all sessions for a source type, or detected tracks for one session",
@@ -1615,6 +1640,73 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             sys.exit(1)
         if not args.force:
             console.print(f"[yellow]Delete topdjmixes session #{session_id} ({len(rows)} track(s))?[/yellow]")
+            if not _confirm("Confirm delete", default=False):
+                sys.exit(0)
+        n = delete_session(session_id)
+        console.print(f"[green]Deleted session #{session_id}.[/green]")
+
+    elif cmd == "text":
+        name = args.name
+        slug = __import__("re").sub(r"[^a-z0-9_-]", "_", name.lower())[:60]
+        ts = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y%m%d_%H%M%S")
+        fake_url = f"text://{slug}-{ts}"
+
+        console.print(
+            f"\n[bold]Paste your tracklist into vi, then save and quit (:wq).[/bold]\n"
+            f"[dim]Session: {name}[/dim]\n"
+        )
+        raw_text = text_open_editor(name)
+
+        tracks, skipped = text_extract_from_text(raw_text)
+        if not tracks:
+            console.print("[yellow]No tracks found — nothing saved.[/yellow]")
+            if skipped:
+                console.print(f"\n[dim]Skipped {len(skipped)} unparseable line(s):[/dim]")
+                for s in skipped:
+                    console.print(f"  [dim]  {s}[/dim]")
+            sys.exit(0)
+
+        console.print(f"\n[bold]Found {len(tracks)} track(s) from \"{name}\":[/bold]\n")
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("#",      style="dim", width=4)
+        t.add_column("Artist", min_width=22)
+        t.add_column("Title",  min_width=30)
+        for tk in tracks:
+            t.add_row(str(tk["position"]), tk["artist"], tk["title"])
+        console.print(t)
+
+        if skipped:
+            console.print(f"\n[yellow]Skipped {len(skipped)} line(s) (no ' - ' separator or too long):[/yellow]")
+            for s in skipped:
+                console.print(f"  [dim]{s}[/dim]")
+
+        session_id = create_session("text", fake_url, name, uploader=name)
+        insert_tracks(tracks, source="text", session_id=session_id)
+        end_session(session_id)
+        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+
+    elif cmd == "text-history":
+        sessions = list_sessions("text", args.limit)
+        if not sessions:
+            console.print("[dim]No text sessions yet.[/dim]")
+            return
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("ID",      style="dim", width=5)
+        t.add_column("Name",    min_width=40)
+        t.add_column("Scanned", style="dim", width=19)
+        t.add_column("Tracks",  style="dim", width=7)
+        for r in sessions:
+            t.add_row(str(r["id"]), r["title"] or "—", r["started_at"][:19], str(r["track_count"]))
+        console.print(t)
+
+    elif cmd == "text-delete-session":
+        session_id = args.session_id
+        rows = tracks_for_session(session_id)
+        if not rows:
+            console.print(f"[yellow]Session #{session_id} not found.[/yellow]")
+            sys.exit(1)
+        if not args.force:
+            console.print(f"[yellow]Delete text session #{session_id} ({len(rows)} track(s))?[/yellow]")
             if not _confirm("Confirm delete", default=False):
                 sys.exit(0)
         n = delete_session(session_id)
@@ -2233,7 +2325,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             extra_label = {"radio": "Station", "mixcloud": "Uploader",
                            "youtube": "Uploader", "podbean": "Podcast",
                            "reddit": "Subreddit", "topdjmixes": "DJ",
-                           "soundcloud": "Uploader"}[args.type]
+                           "soundcloud": "Uploader", "text": "Name"}[args.type]
             t.add_column("ID", style="dim", width=5)
             t.add_column("Title", min_width=32)
             t.add_column(extra_label, min_width=18)
@@ -2318,7 +2410,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         def _pos_str(pos) -> str:
             if pos is None:
                 return "—"
-            return f"#{pos}" if session_type in ("instagram", "reddit") else _fmt_time(pos)
+            return f"#{pos}" if session_type in ("instagram", "reddit", "topdjmixes", "text") else _fmt_time(pos)
 
         rows = tracks_for_session_enriched(args.session_id)
         if not rows:
