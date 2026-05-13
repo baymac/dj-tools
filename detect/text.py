@@ -21,6 +21,8 @@ _SEP_RE = re.compile(r"\s+[-–—]\s+")
 _LABEL_RE = re.compile(r"\s*\[[^\]]{1,50}\]\s*$")
 # leading timestamp: [00:00] / 00:00 / (1:23:45) etc.
 _TS_RE = re.compile(r"^[\[(]?\d{1,2}:\d{2}(?::\d{2})?[\])]?\s*[-–—]?\s*")
+# capture group version for extracting the value
+_TS_CAPTURE_RE = re.compile(r"^[\[(]?(\d{1,2}):(\d{2})(?::(\d{2}))?[\])]?")
 # leading position number: "1." / "2)" / "01."
 _POS_RE = re.compile(r"^\d+[.)]\s*")
 # "w/" overlay prefix: "w/ Artist – Title"
@@ -33,6 +35,17 @@ _URL_RE = re.compile(r"^https?://\S+$")
 _SKIP_PREFIX_RE = re.compile(r"^[>#*_~`|]")
 # ALL-CAPS word boundary (detects merged lines like "BOOTYbritney → BOOTY + britney")
 _CAPS_BOUNDARY_RE = re.compile(r"([A-Z]{2,})([a-z])")
+
+
+def _extract_ts_s(raw: str) -> Optional[int]:
+    """Return seconds from a leading timestamp, or None if the line has no timestamp."""
+    m = _TS_CAPTURE_RE.match(raw.strip())
+    if not m:
+        return None
+    a, b, c = m.group(1), m.group(2), m.group(3)
+    if c is not None:
+        return int(a) * 3600 + int(b) * 60 + int(c)
+    return int(a) * 60 + int(b)
 
 
 def _split_merged(line: str) -> list[str]:
@@ -82,16 +95,31 @@ def _parse_line(line: str) -> Optional[dict]:
 
 
 def extract_from_text(text: str) -> tuple[list[dict], list[str]]:
-    """Parse all track lines. Returns (tracks, skipped_lines)."""
+    """Parse all track lines. Returns (tracks, skipped_lines).
+
+    Each track dict carries:
+      position    — sequential 1-based counter (for ordering)
+      timestamp_s — seconds from line start timestamp, or None.
+                    w/ overlay lines inherit the parent line's timestamp.
+    """
     tracks: list[dict] = []
     skipped: list[str] = []
     seen: set[tuple[str, str]] = set()
     pos = 0
+    last_ts: Optional[int] = None   # seconds of the most recent timestamped line
 
     for raw in text.splitlines():
         raw = raw.strip()
         if not raw or raw.startswith("#"):
             continue
+
+        is_overlay = bool(_W_PREFIX_RE.match(raw))
+        ts = _extract_ts_s(raw)
+        if ts is not None:
+            last_ts = ts
+        # w/ lines inherit the parent timestamp, non-w/ lines without a
+        # timestamp get None (e.g. plain-list tracklists with no times)
+        line_ts = last_ts if is_overlay else ts
 
         candidates = _split_merged(raw)
         parsed_any = False
@@ -103,6 +131,7 @@ def extract_from_text(text: str) -> tuple[list[dict], list[str]]:
                     seen.add(key)
                     pos += 1
                     track["position"] = pos
+                    track["timestamp_s"] = line_ts
                     tracks.append(track)
                 parsed_any = True
 

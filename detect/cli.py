@@ -1681,7 +1681,13 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                 console.print(f"  [dim]{s}[/dim]")
 
         session_id = create_session("text", fake_url, name, uploader=name)
-        insert_tracks(tracks, source="text", session_id=session_id)
+        # Use timestamp_s as position when available so w/ overlays share
+        # their parent track's timestamp. Falls back to sequential position.
+        for tk in tracks:
+            tk_copy = dict(tk)
+            if tk_copy.get("timestamp_s") is not None:
+                tk_copy["position"] = tk_copy["timestamp_s"]
+            insert_track(tk_copy, source="text", session_id=session_id)
         end_session(session_id)
         console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
 
@@ -2410,7 +2416,11 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         def _pos_str(pos) -> str:
             if pos is None:
                 return "—"
-            return f"#{pos}" if session_type in ("instagram", "reddit", "topdjmixes", "text") else _fmt_time(pos)
+            if session_type in ("instagram", "reddit", "topdjmixes"):
+                return f"#{pos}"
+            if session_type == "text":
+                return _fmt_time(pos) if pos >= 60 else f"#{pos}"
+            return _fmt_time(pos)
 
         rows = tracks_for_session_enriched(args.session_id)
         if not rows:
