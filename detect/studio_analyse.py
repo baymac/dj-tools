@@ -183,10 +183,34 @@ def _run_studio_analyse_impl(
     def _is_auth_failure(err: str) -> bool:
         return "status=401" in err or "Signature is invalid" in err
 
-    def _is_audio_unavailable(err: str) -> bool:
+    def _is_audio_unavailable(err: str, res: dict | None = None) -> bool:
         # Beatport SDK signal when audio fetch is refused — typically delisted,
         # region-locked, or pre-release.
-        return "Unable to get audio information" in err
+        if "Unable to get audio information" in err:
+            return True
+        phase = (res or {}).get("phase") or ""
+        return phase.startswith("getTrackAudioInformation")
+
+    def _format_err_detail(err: str, res: dict) -> str:
+        """Enrich a bare error message with phase + error_props context from res.
+
+        The JS helper forwards these fields for every failure so Python can
+        classify and display the real cause instead of the opaque SDK string.
+        """
+        parts = [err]
+        phase = res.get("phase")
+        if phase:
+            parts.append(f"phase={phase}")
+        ep = res.get("error_props") or {}
+        if isinstance(ep, dict):
+            for key in ("info_status", "status", "statusCode", "code", "info_message"):
+                val = ep.get(key)
+                if val and str(val) not in err:
+                    parts.append(f"{key}={val}")
+        bp_state = res.get("bp_state")
+        if bp_state and str(bp_state) not in err:
+            parts.append(f"bp_state={bp_state}")
+        return "  ".join(parts)
 
     def _is_bp_token_stale(res: dict) -> bool:
         """Did this Beatport-SDK failure smell like a stale OAuth token?
@@ -340,7 +364,7 @@ def _run_studio_analyse_impl(
                 if ok:
                     counts["ok"] += 1
                     _clear_failure(failures, row["beatport_id"])
-                elif _is_audio_unavailable(err) and _is_pre_release(row):
+                elif _is_audio_unavailable(err, res) and _is_pre_release(row):
                     # Pre-release: Beatport withholds audio until release_date. Skip
                     # without bumping the failure counter so the next run after the
                     # release date will retry naturally.
@@ -350,9 +374,10 @@ def _run_studio_analyse_impl(
                         f"({row['release_date']}, drops in the future)[/dim]"
                     )
                 else:
-                    failed_rows.append({"row": row, "error": err})
+                    detail = _format_err_detail(err, res)
+                    failed_rows.append({"row": row, "error": detail})
                     if verbose:
-                        progress.log(f"[yellow]bp:{row['beatport_id']} first-pass failed:[/yellow] {err[:160]}")
+                        progress.log(f"[yellow]bp:{row['beatport_id']} first-pass failed:[/yellow] {detail[:240]}")
 
             if failed_rows:
                 console.print(f"[dim]Retrying {len(failed_rows)} failed track(s) after 5s pause…[/dim]")
@@ -396,11 +421,12 @@ def _run_studio_analyse_impl(
                         counts["retried"] += 1
                         _clear_failure(failures, row["beatport_id"])
                     else:
+                        detail = _format_err_detail(err, res)
                         counts["fail"] += 1
-                        still_failed.append({"row": row, "error": err})
-                        _record_failure(failures, row["beatport_id"], err)
+                        still_failed.append({"row": row, "error": detail})
+                        _record_failure(failures, row["beatport_id"], detail)
                         if verbose:
-                            progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {err[:160]}")
+                            progress.log(f"[red]bp:{row['beatport_id']} retry also failed:[/red] {detail[:240]}")
                 failed_rows = still_failed
         finally:
             _kill_helper(helper)
@@ -424,4 +450,4 @@ def _run_studio_analyse_impl(
         for fr in failed_rows:
             r = fr["row"]
             attempts = failures.get(r["beatport_id"], {}).get("attempts", 1)
-            console.print(f"  bp:{r['beatport_id']} (attempt {attempts}/{MAX_FAILURE_ATTEMPTS}) — {r['artist']} — {r['title']}: {fr['error'][:160]}")
+            console.print(f"  bp:{r['beatport_id']} (attempt {attempts}/{MAX_FAILURE_ATTEMPTS}) — {r['artist']} — {r['title']}: {fr['error'][:300]}")
