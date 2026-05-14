@@ -471,7 +471,19 @@ class SdkHelper:
             if evt.get("event") == "log" and self._verbose:
                 console.log(f"[dim]helper:[/dim] {evt.get('message')}")
             if evt.get("event") == "error":
-                raise RuntimeError(f"helper init error: {evt.get('message')}")
+                msg = evt.get("message") or ""
+                if "Beatport login failed" in msg or "login" in msg.lower():
+                    raise RuntimeError(
+                        f"Beatport SDK login failed — the cached OAuth token in "
+                        f"~/Music/DJ.Studio/.beatport/ is stale or missing.\n\n"
+                        f"Fix:\n"
+                        f"  1. Open DJ Studio (it will auto-refresh the token)\n"
+                        f"  2. Wait ~5 seconds until it loads your library\n"
+                        f"  3. Quit DJ Studio (Cmd+Q)\n"
+                        f"  4. Re-run studio-analyse\n\n"
+                        f"Raw SDK error: {msg}"
+                    )
+                raise RuntimeError(f"helper init error: {msg}")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

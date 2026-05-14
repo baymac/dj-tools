@@ -23,12 +23,26 @@ from caffeinate import caffeinate
 from connections import beatport as bp_api
 from connections.matching import MATCH_THRESHOLD, best_match, search_query, strip_remix
 from detect import db as detect_db
-from detect.db import mark_enrich_miss
+from detect.db import get_enriched_artist_titles, mark_enrich_miss
 
 console = Console()
 
 from paths import LOGS_DIR as _LOGS_ROOT
 _LOG_DIR = _LOGS_ROOT / "enrich"
+
+# Matches any parenthetical/bracketed tag that contains a version/mix keyword
+# e.g. "(Ezel Extended)", "(Daniele Busciala Extended)", "(Radio Edit)", "(Instrumental)"
+_VERSION_TAG_RE = re.compile(
+    r"\s*[\(\[][^\)\]]*\b(?:extended|original|radio|club|instrumental|acapella|vip|dub|"
+    r"mix|edit|version|remix|rework|bootleg|mashup|flip)\b[^\)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+
+
+def _base_key(artist: str, title: str) -> tuple[str, str]:
+    """Normalised (artist, title) pair for version-variant deduplication."""
+    stripped = _VERSION_TAG_RE.sub("", title).strip().lower()
+    return (artist.lower().strip(), stripped)
 
 
 def _get_token() -> str:
@@ -189,7 +203,15 @@ def run_enrich(
         if verbose:
             progress.log(rich_msg or plain)
 
-    counts = {"seen": 0, "found": 0, "not_found": 0, "fuzzy_miss": 0, "failed": 0}
+    counts = {"seen": 0, "found": 0, "not_found": 0, "fuzzy_miss": 0, "failed": 0, "duplicate": 0}
+
+    # Seed seen base-titles from already-enriched tracks so that version variants
+    # detected in a previous run are also caught.
+    seen_base_titles: set[tuple[str, str]] = {
+        _base_key(r["artist"], r["title"])
+        for r in get_enriched_artist_titles()
+        if r["artist"] and r["title"]
+    }
 
     with caffeinate(), progress:
         task = progress.add_task("Enriching…", total=len(tracks))
@@ -203,6 +225,20 @@ def run_enrich(
             title = track["title"] or ""
 
             progress.update(task, description=f"{artist} — {title}")
+
+            bk = _base_key(artist, title)
+            if bk in seen_base_titles:
+                _log(
+                    f"duplicate  {artist} — {title}  (base title already enriched)",
+                    f"[dim]duplicate:[/dim] {artist} — {title}",
+                )
+                if not dry_run:
+                    mark_enrich_miss(track_id, "duplicate")
+                counts["duplicate"] += 1
+                continue
+            # Reserve this base title for the current run before the API call
+            # so parallel-ish processing within the same batch also deduplicates.
+            seen_base_titles.add(bk)
 
             artist_query = re.sub(r"\s*[\(\[].*?[\)\]]", "", artist).strip()
             query = f"{artist_query} {search_query(title)}"
@@ -350,6 +386,7 @@ def run_enrich(
         f"--- enrich {'(dry run) ' if dry_run else ''}complete ---",
         f"tracks_seen:   {counts['seen']}",
         f"enriched:      {counts['found']}",
+        f"duplicate:     {counts['duplicate']}",
         f"no_results:    {counts['not_found']}",
         f"fuzzy_miss:    {counts['fuzzy_miss']}",
         f"search_errors: {counts['failed']}",
@@ -362,6 +399,8 @@ def run_enrich(
     console.print(f"[bold]Enrich {'(dry run) ' if dry_run else ''}complete[/bold]")
     console.print(f"  Seen:          {counts['seen']}")
     console.print(f"  Enriched:      {counts['found']}")
+    if counts["duplicate"]:
+        console.print(f"  Duplicate:     {counts['duplicate']}")
     console.print(f"  No results:    {counts['not_found']}")
     console.print(f"  Fuzzy miss:    {counts['fuzzy_miss']}")
     console.print(f"  Search errors: {counts['failed']}")

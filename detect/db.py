@@ -586,6 +586,11 @@ def upsert_enriched(detected_track_id: int, meta: dict, extras: dict | None = No
         )
 
 
+def get_enriched_artist_titles() -> list[sqlite3.Row]:
+    with _connect() as con:
+        return con.execute("SELECT artist, title FROM enriched_tracks").fetchall()
+
+
 def mark_enrich_miss(detected_track_id: int, outcome: str) -> None:
     with _connect() as con:
         con.execute(

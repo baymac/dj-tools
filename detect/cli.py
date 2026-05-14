@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -126,6 +127,17 @@ def _render_shazam_tracks(tracks: list[dict]) -> None:
             t.get("apple_music_url") or "—",
         )
     console.print(table)
+
+
+_MIX_SUFFIX_RE = re.compile(
+    r"\s*[\(\-]\s*(extended|original|radio|club|instrumental|acapella|vip|dub|reprise)"
+    r"[\s\w]*\s*(?:mix|edit|version|remix|rework)?\s*[\)\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _base_title(title: str) -> str:
+    return _MIX_SUFFIX_RE.sub("", title).strip().lower()
 
 
 def _fmt_time(seconds: int) -> str:
@@ -504,11 +516,16 @@ async def _run_mixcloud(
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
+        seen_base_keys: set[str] = {
+            f"{r['artist']}:{_base_title(r['title'])}"
+            for r in prior_tracks if r["title"]
+        }
         all_tracks: list[dict] = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("mixcloud", url, mix_title, uploader or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
         seen_keys = set()
+        seen_base_keys = set()
         all_tracks = []
 
     total_checked = 0
@@ -577,11 +594,13 @@ async def _run_mixcloud(
                     continue
 
                 key = track.get("shazam_key") or f"{track.get('artist')}:{track.get('title')}"
-                if key in seen_keys:
+                base_key = f"{track.get('artist')}:{_base_title(track.get('title', ''))}"
+                if key in seen_keys or base_key in seen_base_keys:
                     console.print(f"  [dim]{label} {track['artist']} — {track['title']} (duplicate)[/dim]")
                     continue
 
                 seen_keys.add(key)
+                seen_base_keys.add(base_key)
                 track["position"] = pos
                 insert_track(track, source="mixcloud", session_id=session_id)
                 total_saved += 1
@@ -659,11 +678,16 @@ async def _run_youtube(
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
+        seen_base_keys: set[str] = {
+            f"{r['artist']}:{_base_title(r['title'])}"
+            for r in prior_tracks if r["title"]
+        }
         all_tracks: list[dict] = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("youtube", url, video_title, uploader or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
         seen_keys = set()
+        seen_base_keys = set()
         all_tracks = []
 
     total_checked = 0
@@ -736,7 +760,8 @@ async def _run_youtube(
                     continue
 
                 key = track.get("shazam_key") or f"{track.get('artist')}:{track.get('title')}"
-                if key in seen_keys:
+                base_key = f"{track.get('artist')}:{_base_title(track.get('title', ''))}"
+                if key in seen_keys or base_key in seen_base_keys:
                     console.print(f"  [dim]{label} {track['artist']} — {track['title']} (duplicate)[/dim]")
                     upsert_shazam_slice(session_id, pos, "duplicate",
                                         artist=track.get("artist"), title=track.get("title"),
@@ -744,6 +769,7 @@ async def _run_youtube(
                     continue
 
                 seen_keys.add(key)
+                seen_base_keys.add(base_key)
                 track["position"] = pos
                 insert_track(track, source="youtube", session_id=session_id)
                 total_saved += 1
@@ -909,11 +935,16 @@ async def _run_soundcloud(
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
+        seen_base_keys: set[str] = {
+            f"{r['artist']}:{_base_title(r['title'])}"
+            for r in prior_tracks if r["title"]
+        }
         all_tracks: list[dict] = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("soundcloud", url, mix_title, uploader or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
         seen_keys = set()
+        seen_base_keys = set()
         all_tracks = []
 
     total_checked = 0
@@ -982,11 +1013,13 @@ async def _run_soundcloud(
                     continue
 
                 key = track.get("shazam_key") or f"{track.get('artist')}:{track.get('title')}"
-                if key in seen_keys:
+                base_key = f"{track.get('artist')}:{_base_title(track.get('title', ''))}"
+                if key in seen_keys or base_key in seen_base_keys:
                     console.print(f"  [dim]{label} {track['artist']} — {track['title']} (duplicate)[/dim]")
                     continue
 
                 seen_keys.add(key)
+                seen_base_keys.add(base_key)
                 track["position"] = pos
                 insert_track(track, source="soundcloud", session_id=session_id)
                 total_saved += 1
@@ -1064,11 +1097,16 @@ async def _run_podbean(
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
+        seen_base_keys: set[str] = {
+            f"{r['artist']}:{_base_title(r['title'])}"
+            for r in prior_tracks if r["title"]
+        }
         all_tracks: list[dict] = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("podbean", url, episode_title, podcast_name or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
         seen_keys = set()
+        seen_base_keys = set()
         all_tracks = []
 
     total_checked = 0
@@ -1137,11 +1175,13 @@ async def _run_podbean(
                     continue
 
                 key = track.get("shazam_key") or f"{track.get('artist')}:{track.get('title')}"
-                if key in seen_keys:
+                base_key = f"{track.get('artist')}:{_base_title(track.get('title', ''))}"
+                if key in seen_keys or base_key in seen_base_keys:
                     console.print(f"  [dim]{label} {track['artist']} — {track['title']} (duplicate)[/dim]")
                     continue
 
                 seen_keys.add(key)
+                seen_base_keys.add(base_key)
                 track["position"] = pos
                 insert_track(track, source="podbean", session_id=session_id)
                 total_saved += 1
