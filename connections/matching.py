@@ -10,12 +10,16 @@ MATCH_THRESHOLD = 0.72
 _BARE_FEAT_RE = re.compile(r"\s+(feat\.?|ft\.?)\s+\S.*", re.I)
 # Matches a parenthetical/bracket block that contains the word "remix" — used to detect
 # remix versions so "X (Someone Remix)" is never silently matched against plain "X".
-_REMIX_TAG_RE = re.compile(r"[\(\[][^\)\]]*\bremix\b[^\)\]]*[\)\]]", re.I)
-# Generic remix tags are version labels, not specific remixes.
-# Heuristic: remixer names need 2+ words (e.g. "John Summit Remix").
-# A single prefix word — year, adjective, style, or one-word alias — is treated as generic.
-# Covers: [Remix], (2022 Remix), (Albanian Remix), (Extended Remix), (Alok Remix), etc.
-_GENERIC_REMIX_RE = re.compile(r"^(\d{4}|\w+)?\s*remix$", re.I)
+# Matches a parenthetical containing "remix" or a specific edit variant.
+# "Live Edit", "Radio Edit", "Club Edit", "VIP Edit" are version-specific.
+# Generic labels like "Extended Mix", "Original Mix" do NOT contain "remix"/"edit"
+# so they fall through and are treated as neutral.
+_REMIX_TAG_RE = re.compile(r"[\(\[][^\)\]]*\b(?:remix|edit)\b[^\)\]]*[\)\]]", re.I)
+# Generic: bare "remix"/"edit" or single-word prefix — not a discriminating version tag.
+# Covers: [Remix], (2022 Remix), (Alok Remix), [Edit], (Radio Edit), (Club Edit).
+# Explicit exclusions: "live edit" IS specific — a live-performance version that must not
+# silently swap with Extended Mix or the studio original on Beatport.
+_GENERIC_REMIX_RE = re.compile(r"^(?!live\s)(\d{4}|\w+)?\s*(?:remix|edit)$", re.I)
 
 
 def _normalise(s: str) -> str:
