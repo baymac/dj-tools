@@ -1400,6 +1400,18 @@ Examples:
     pb_del_p.add_argument("session_id", type=int)
     pb_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
 
+    # gems
+    gems_p = sub.add_parser("gems", help="Find hidden gem tracks on Spotify, SoundCloud, Bandcamp, or Beatport")
+    gems_p.add_argument("--source", choices=["spotify", "soundcloud", "bandcamp", "beatport"],
+                        default=None, help="Platform to search (interactive if omitted)")
+    gems_p.add_argument("--genre", default=None, help="Genre to search (default: Tech House)")
+    gems_p.add_argument("--count", "-n", type=int, default=None,
+                        help="Number of tracks to return (1–20)")
+    gems_p.add_argument("--date", choices=["1mo", "6mo", "1yr", "3yr"],
+                        default=None, help="Max track age: 1mo / 6mo / 1yr / 3yr")
+    gems_p.add_argument("--no-save", action="store_true", dest="no_save",
+                        help="Don't persist results to the DB (testing only)")
+
     # login-instagram
     li_p = sub.add_parser("login-instagram", help="Save Instagram credentials and verify login")
     li_p.add_argument("--username", "-u", default=None, help="Instagram username")
@@ -2270,6 +2282,19 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         console.print(
             "[green]✓[/green] SoundCloud user OAuth complete. "
             "Personalized /discover/ URLs are now supported."
+        )
+
+    elif cmd == "gems":
+        from detect.gems import DATE_KEYS, DATE_DAYS, run_gems
+        max_age_days = None
+        if args.date:
+            max_age_days = DATE_DAYS[DATE_KEYS.index(args.date)]
+        run_gems(
+            source=args.source,
+            genre=args.genre,
+            count=args.count,
+            max_age_days=max_age_days,
+            no_save=args.no_save,
         )
 
     elif cmd == "enrich":

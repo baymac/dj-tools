@@ -62,6 +62,32 @@ def migrate() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_ts_session ON track_sessions(session_id);
 
+            CREATE TABLE IF NOT EXISTS gem_scans (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source          TEXT    NOT NULL,
+                genre           TEXT    NOT NULL,
+                requested_count INTEGER,
+                max_age_days    INTEGER,
+                found_count     INTEGER DEFAULT 0,
+                created_at      TEXT    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_gem_scans_session ON gem_scans(session_id);
+
+            CREATE TABLE IF NOT EXISTS gem_tracks (
+                detected_track_id INTEGER NOT NULL REFERENCES detected_tracks(id) ON DELETE CASCADE,
+                gem_scan_id       INTEGER NOT NULL REFERENCES gem_scans(id) ON DELETE CASCADE,
+                source            TEXT    NOT NULL,
+                url               TEXT,
+                release_date      TEXT,
+                plays             INTEGER,
+                popularity        INTEGER,
+                PRIMARY KEY (detected_track_id, gem_scan_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_gem_tracks_fade ON gem_tracks(source, release_date);
+
             CREATE TABLE IF NOT EXISTS enriched_tracks (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 detected_track_id INTEGER UNIQUE REFERENCES detected_tracks(id) ON DELETE CASCADE,
@@ -249,6 +275,76 @@ def update_session_progress(session_id: int, position: int) -> None:
             "UPDATE sessions SET last_scanned_position = ? WHERE id = ?",
             (position, session_id),
         )
+
+
+# ── Gem scans ─────────────────────────────────────────────────────────────────
+
+
+def create_gem_scan(
+    session_id: int,
+    source: str,
+    genre: str,
+    requested_count: int | None,
+    max_age_days: int | None,
+) -> int:
+    """Insert a gem_scans row for one `detect gems` run. Returns its id."""
+    with _connect() as con:
+        cur = con.execute(
+            """INSERT INTO gem_scans
+               (session_id, source, genre, requested_count, max_age_days, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_id, source, genre, requested_count, max_age_days, _now()),
+        )
+        return cur.lastrowid
+
+
+def finish_gem_scan(gem_scan_id: int, found_count: int) -> None:
+    with _connect() as con:
+        con.execute(
+            "UPDATE gem_scans SET found_count = ? WHERE id = ?",
+            (found_count, gem_scan_id),
+        )
+
+
+def insert_gem_track(
+    detected_track_id: int,
+    gem_scan_id: int,
+    source: str,
+    url: str | None,
+    release_date: str | None,
+    plays: int | None = None,
+    popularity: int | None = None,
+) -> None:
+    """Record gems-specific per-track metadata. Idempotent per (track, scan)."""
+    with _connect() as con:
+        con.execute(
+            """INSERT OR IGNORE INTO gem_tracks
+               (detected_track_id, gem_scan_id, source, url, release_date, plays, popularity)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (detected_track_id, gem_scan_id, source, url, release_date, plays, popularity),
+        )
+
+
+def seen_gem_keys(source: str, cutoff_date: str) -> set[tuple[str, str]]:
+    """Return (artist, title) keys of prior gems on `source` that could recur.
+
+    Gems released before `cutoff_date` (YYYY-MM-DD) are "faded" — they can't
+    appear in a search bounded by that cutoff, so they're dropped from the
+    comparison set. NULL release dates can't be fade-proven, so they're kept.
+    """
+    with _connect() as con:
+        rows = con.execute(
+            """SELECT d.artist AS artist, d.title AS title
+               FROM gem_tracks gt
+               JOIN detected_tracks d ON d.id = gt.detected_track_id
+               WHERE gt.source = ?
+                 AND (gt.release_date IS NULL OR gt.release_date >= ?)""",
+            (source, cutoff_date),
+        ).fetchall()
+    return {
+        ((r["artist"] or "").strip().lower(), (r["title"] or "").strip().lower())
+        for r in rows
+    }
 
 
 def upsert_shazam_slice(

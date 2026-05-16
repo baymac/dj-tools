@@ -24,6 +24,7 @@ connections/                    Transport layer (no app-specific deps)
 detect/                         Track detection + enrichment pipeline (Stages 2-6)
   db.py                         All detect+enrich DB operations
   cli.py                        argparse subcommands + async dispatch
+  gems.py                       detect gems: low-play track discovery (Spotify/SoundCloud/Bandcamp/Beatport)
   enrich.py                     Stage 3: detected → Beatport metadata (also full track-detail)
   sync_beatport.py              Stage 4: pull Beatport library → enriched_tracks
   studio_sdk.py                 Shared SDK driver: SdkHelper + _shape_result + token decrypt
@@ -74,6 +75,7 @@ uv run dj_cli.py login-beatport          # auto / --ui / --cookie
 # Pipeline (see README.md for full flow)
 uv run dj_cli.py sync music-beatport sync --library
 uv run dj_cli.py detect youtube <url>
+uv run dj_cli.py detect gems --source beatport --genre "Tech House" --count 10 --date 1mo  # discover low-play tracks → detected_tracks
 uv run dj_cli.py detect enrich
 uv run dj_cli.py detect sync-beatport
 uv run dj_cli.py detect studio-analyse                                                  # Stage 5: SDK → enriched_tracks_analysis
@@ -105,6 +107,12 @@ uv run helpers/cleanup_playlist.py "Playlist Name" --dry-run
 - **Beatport access token refresh** — `BEATPORT_ACCESS_TOKEN` ~10 min, `BEATPORT_SESSION_TOKEN` ~32 days. The session token auto-refreshes the access token on 401. Don't add manual refresh wrappers around individual stages. `connections/beatport.refresh_via_session(verbose=True)` (or `BEATPORT_DEBUG=1`) prints the real cause when refresh fails — usually means the persistent browser profile at `~/Music/dj-tools/state/browser-profile/` needs wiping so `--ui` can do a clean re-login.
 - **Stage 1 (sync) cursor** — `--library` mode tracks the last `library_added_date` processed in the `cursors` table; re-runs only handle new Apple Music additions. `synced_tracks` keeps per-track outcome (`added` / `duplicate` / `fuzzy_miss` / `no_classify`) so a track is never reprocessed.
 - **caffeinate on long-running commands** — `caffeinate.py` (top-level) provides a `caffeinate()` context manager that runs `caffeinate -i` to prevent macOS idle sleep. Applied to: `detect studio-analyse` (Node SDK analysis, ~23s/track, can run hours over a full library), `detect enrich` (sequential Beatport API calls, can run 20+ min on large libraries), `detect radio-garden` (indefinite monitoring loop). The macOS power assertion is released automatically when the `caffeinate` process exits. Not needed for fast filesystem-only commands (`import-rekordbox-analysis`, `export-to-rekordbox`).
+
+### Discovery (detect gems)
+
+- **`detect gems` feeds the same `detected_tracks` table** — gems found on Spotify/SoundCloud/Bandcamp/Beatport are persisted via the normal `insert_track` dedup path, so they flow into `enrich` like any other detected track. Each saved run also writes a `sessions` row (`type='gems'`, synthetic `gems://<source>/<genre>?t=<iso>` URL to satisfy the `UNIQUE(url)` constraint) + a `gem_scans` row + per-track `gem_tracks` rows. `--no-save` shows results but skips all of that.
+- **Cross-run dedup is content-based, not offset-based** — platform results reshuffle over time, so the next run can't trust a page offset. `db.seen_gem_keys(source, cutoff)` builds an exclude set of prior `(artist, title)` keys and each search pages until `--count` *new* tracks are collected. Prior gems with a release date older than the current `--date` cutoff are "faded" (dropped from the comparison set — they can't recur in a window that excludes them anyway); `gem_tracks` is indexed on `(source, release_date)` for this. Dedup is per-platform — safe because `enrich`'s `upsert_enriched` collapses cross-platform duplicates by `beatport_id`.
+- **Per-platform gem signal differs** — Beatport filters by exact `genre_id` (only authoritative genre source) and drops Hype (label-paid promotion) tracks since it has no public play count; SoundCloud filters `playback_count < 5000`; Spotify mines editorial playlists by `popularity` (its `genre:` search filter is unreliable for sub-genres); Bandcamp filters by uploader `tag_norm_names` via `discover/1/discover_web` (the older `discover/3/get_web` silently ignored the tag param, returning every genre). Genre IDs / tag mappings live in `detect/gems.py` — extend `_BEATPORT_GENRE_IDS` / `GENRES` to add genres.
 
 ### playlist (SQL → destination)
 
