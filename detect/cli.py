@@ -44,6 +44,7 @@ from .db import (
     list_sessions,
     list_tracks,
     migrate,
+    remove_tracks_from_session,
     tracks_for_session,
     tracks_for_session_enriched,
     update_session_progress,
@@ -55,6 +56,11 @@ from .reddit import extract_from_text as reddit_extract_from_text, open_editor_f
 from .topdjmixes import (
     extract_from_text as topdjmixes_extract_from_text,
     open_editor_for_post as topdjmixes_open_editor,
+)
+from .tracklists1001 import (
+    extract_from_text as tracklists1001_extract_from_text,
+    extract_title_from_text as tracklists1001_extract_title,
+    open_editor_for_url as tracklists1001_open_editor,
 )
 from .text import extract_from_text as text_extract_from_text, open_editor_for_session as text_open_editor
 from .shazam import RECOGNIZE_TIMEOUT, format_result, recognize_file
@@ -186,6 +192,7 @@ async def _run(
     password: str,
     output: Optional[str],
     json_output: bool,
+    dry_run: bool = False,
 ) -> None:
     console.print("[dim]Logging into Instagram…[/dim]")
     try:
@@ -196,6 +203,9 @@ async def _run(
         console.print(f"[red]Login failed:[/red] {exc}")
         sys.exit(1)
     console.print("[green]✓[/green] Logged in")
+
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
 
     with console.status("[bold green]Fetching post…"):
         try:
@@ -252,9 +262,12 @@ async def _run(
 
     if tracks:
         shortcode = url.split("/p/")[-1].split("/")[0].split("?")[0]
-        session_id = create_session("instagram", url, shortcode, caption=caption or None)
-        insert_tracks(tracks, source="instagram", session_id=session_id)
-        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        if not dry_run:
+            session_id = create_session("instagram", url, shortcode, caption=caption or None)
+            insert_tracks(tracks, source="instagram", session_id=session_id)
+            console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        else:
+            console.print("\n[yellow](dry run — nothing saved)[/yellow]")
 
     if json_output:
         console.print_json(json.dumps(tracks, ensure_ascii=False))
@@ -309,7 +322,7 @@ async def _shazam_slides(cl, media) -> list[dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _run_radio(url: str, *, interval: int, capture_s: int, duration_min: int, cooldown: int) -> None:
+async def _run_radio(url: str, *, interval: int, capture_s: int, duration_min: int, cooldown: int, dry_run: bool = False) -> None:
     from .radio import capture_chunk, resolve_station
 
     with console.status("Resolving stream URL…"):
@@ -322,8 +335,12 @@ async def _run_radio(url: str, *, interval: int, capture_s: int, duration_min: i
     console.print(f"[green]✓[/green] Station: [bold]{station_name}[/bold]")
     console.print(f"  Stream:  [dim]{stream_url}[/dim]")
 
-    session_id = create_session("radio", stream_url, station_name)
-    console.print(f"  Session [bold]#{session_id}[/bold] started")
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+        session_id = -1
+    else:
+        session_id = create_session("radio", stream_url, station_name)
+        console.print(f"  Session [bold]#{session_id}[/bold] started")
 
     if duration_min:
         console.print(
@@ -442,9 +459,10 @@ async def _run_radio(url: str, *, interval: int, capture_s: int, duration_min: i
                         )
                     else:
                         recent[key] = now_mono
-                        new_id = insert_track(track, source="radio", session_id=session_id)
-                        last_saved_id = new_id
-                        last_saved_mono = now_mono
+                        if not dry_run:
+                            new_id = insert_track(track, source="radio", session_id=session_id)
+                            last_saved_id = new_id
+                            last_saved_mono = now_mono
                         total_saved += 1
                         am = track.get("apple_music_url") or ""
                         console.print(
@@ -462,9 +480,11 @@ async def _run_radio(url: str, *, interval: int, capture_s: int, duration_min: i
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
     finally:
-        end_session(session_id)
+        if not dry_run:
+            end_session(session_id)
+        footer = "[yellow](dry run — nothing saved)[/yellow]" if dry_run else f"Session #{session_id} ended."
         console.print(
-            f"\n[bold]Session #{session_id} ended.[/bold]  "
+            f"\n[bold]{footer}[/bold]  "
             f"Checked {total_checked} windows, saved [green]{total_saved}[/green] new tracks."
         )
 
@@ -484,6 +504,7 @@ async def _run_mixcloud(
     json_output: bool,
     resume_session_id: int | None = None,
     resume_from: int = 0,
+    dry_run: bool = False,
 ) -> None:
     from .mixcloud import audio_duration, download_mix, resolve_mix
     from .radio import slice_audio
@@ -505,22 +526,28 @@ async def _run_mixcloud(
             f"→ ~{n_checks} slices (every {scan_interval}s, {capture_s}s each)"
         )
 
-    if resume_session_id is not None:
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+        session_id = -1
+        seen_keys: set[str] = set()
+        seen_base_keys: set[str] = set()
+        all_tracks: list[dict] = []
+    elif resume_session_id is not None:
         session_id = resume_session_id
         console.print(
             f"  [yellow]Resuming session [bold]#{session_id}[/bold] "
             f"from {_fmt_time(resume_from)}[/yellow]"
         )
         prior_tracks = tracks_for_session(session_id)
-        seen_keys: set[str] = {
+        seen_keys = {
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
-        seen_base_keys: set[str] = {
+        seen_base_keys = {
             f"{r['artist']}:{_base_title(r['title'])}"
             for r in prior_tracks if r["title"]
         }
-        all_tracks: list[dict] = [dict(r) for r in prior_tracks]
+        all_tracks = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("mixcloud", url, mix_title, uploader or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
@@ -570,7 +597,8 @@ async def _run_mixcloud(
                     slice_audio(str(mix_path), pos, capture_s, slice_path)
                 except subprocess.CalledProcessError:
                     console.print(f"  {label} [red]slice failed[/red]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
 
                 try:
@@ -579,15 +607,18 @@ async def _run_mixcloud(
                     track = format_result(raw)
                 except asyncio.TimeoutError:
                     console.print(f"  {label} [yellow]Shazam timeout ({RECOGNIZE_TIMEOUT}s)[/yellow]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
                 except Exception as exc:
                     console.print(f"  {label} [yellow]Shazam error: {exc}[/yellow]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
 
                 total_checked += 1
-                update_session_progress(session_id, pos)
+                if not dry_run:
+                    update_session_progress(session_id, pos)
 
                 if not track.get("title"):
                     console.print(f"  [dim]{label} not recognized[/dim]")
@@ -602,7 +633,8 @@ async def _run_mixcloud(
                 seen_keys.add(key)
                 seen_base_keys.add(base_key)
                 track["position"] = pos
-                insert_track(track, source="mixcloud", session_id=session_id)
+                if not dry_run:
+                    insert_track(track, source="mixcloud", session_id=session_id)
                 total_saved += 1
                 all_tracks.append(track)
                 am = track.get("apple_music_url") or ""
@@ -615,9 +647,11 @@ async def _run_mixcloud(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
     finally:
-        end_session(session_id)
+        if not dry_run:
+            end_session(session_id)
+        footer = "[yellow](dry run — nothing saved)[/yellow]" if dry_run else f"Session #{session_id} complete."
         console.print(
-            f"\n[bold]Session #{session_id} complete.[/bold]  "
+            f"\n[bold]{footer}[/bold]  "
             f"Checked {total_checked} slices, found [green]{total_saved}[/green] unique tracks."
         )
 
@@ -646,6 +680,7 @@ async def _run_youtube(
     json_output: bool,
     resume_session_id: int | None = None,
     resume_from: int = 0,
+    dry_run: bool = False,
 ) -> None:
     from .youtube import audio_duration, download_video, resolve_video
     from .radio import slice_audio
@@ -667,22 +702,28 @@ async def _run_youtube(
             f"→ ~{n_checks} slices (every {scan_interval}s, {capture_s}s each)"
         )
 
-    if resume_session_id is not None:
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+        session_id = -1
+        seen_keys: set[str] = set()
+        seen_base_keys: set[str] = set()
+        all_tracks: list[dict] = []
+    elif resume_session_id is not None:
         session_id = resume_session_id
         console.print(
             f"  [yellow]Resuming session [bold]#{session_id}[/bold] "
             f"from {_fmt_time(resume_from)}[/yellow]"
         )
         prior_tracks = tracks_for_session(session_id)
-        seen_keys: set[str] = {
+        seen_keys = {
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
-        seen_base_keys: set[str] = {
+        seen_base_keys = {
             f"{r['artist']}:{_base_title(r['title'])}"
             for r in prior_tracks if r["title"]
         }
-        all_tracks: list[dict] = [dict(r) for r in prior_tracks]
+        all_tracks = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("youtube", url, video_title, uploader or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
@@ -732,8 +773,9 @@ async def _run_youtube(
                     slice_audio(str(video_path), pos, capture_s, slice_path)
                 except subprocess.CalledProcessError:
                     console.print(f"  {label} [red]slice failed[/red]")
-                    upsert_shazam_slice(session_id, pos, "slice_failed")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        upsert_shazam_slice(session_id, pos, "slice_failed")
+                        update_session_progress(session_id, pos)
                     continue
 
                 try:
@@ -742,42 +784,50 @@ async def _run_youtube(
                     track = format_result(raw)
                 except asyncio.TimeoutError:
                     console.print(f"  {label} [yellow]Shazam timeout ({RECOGNIZE_TIMEOUT}s)[/yellow]")
-                    upsert_shazam_slice(session_id, pos, "timeout")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        upsert_shazam_slice(session_id, pos, "timeout")
+                        update_session_progress(session_id, pos)
                     continue
                 except Exception as exc:
                     console.print(f"  {label} [yellow]Shazam error: {exc}[/yellow]")
-                    upsert_shazam_slice(session_id, pos, "error")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        upsert_shazam_slice(session_id, pos, "error")
+                        update_session_progress(session_id, pos)
                     continue
 
                 total_checked += 1
-                update_session_progress(session_id, pos)
+                if not dry_run:
+                    update_session_progress(session_id, pos)
 
                 if not track.get("title"):
                     console.print(f"  [dim]{label} not recognized[/dim]")
-                    upsert_shazam_slice(session_id, pos, "not_recognized")
+                    if not dry_run:
+                        upsert_shazam_slice(session_id, pos, "not_recognized")
                     continue
 
                 key = track.get("shazam_key") or f"{track.get('artist')}:{track.get('title')}"
                 base_key = f"{track.get('artist')}:{_base_title(track.get('title', ''))}"
                 if key in seen_keys or base_key in seen_base_keys:
                     console.print(f"  [dim]{label} {track['artist']} — {track['title']} (duplicate)[/dim]")
-                    upsert_shazam_slice(session_id, pos, "duplicate",
-                                        artist=track.get("artist"), title=track.get("title"),
-                                        shazam_key=track.get("shazam_key"))
+                    if not dry_run:
+                        upsert_shazam_slice(session_id, pos, "duplicate",
+                                            artist=track.get("artist"), title=track.get("title"),
+                                            shazam_key=track.get("shazam_key"))
                     continue
 
                 seen_keys.add(key)
                 seen_base_keys.add(base_key)
                 track["position"] = pos
-                insert_track(track, source="youtube", session_id=session_id)
+                if not dry_run:
+                    insert_track(track, source="youtube", session_id=session_id)
+                    am = track.get("apple_music_url") or ""
+                    upsert_shazam_slice(session_id, pos, "found",
+                                        artist=track.get("artist"), title=track.get("title"),
+                                        shazam_key=track.get("shazam_key"), apple_music_url=am or None)
+                else:
+                    am = track.get("apple_music_url") or ""
                 total_saved += 1
                 all_tracks.append(track)
-                am = track.get("apple_music_url") or ""
-                upsert_shazam_slice(session_id, pos, "found",
-                                    artist=track.get("artist"), title=track.get("title"),
-                                    shazam_key=track.get("shazam_key"), apple_music_url=am or None)
                 console.print(
                     f"  [green bold]FOUND[/green bold]  {label}  "
                     f"[bold]{track['artist']}[/bold] — {track['title']}"
@@ -787,9 +837,11 @@ async def _run_youtube(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
     finally:
-        end_session(session_id)
+        if not dry_run:
+            end_session(session_id)
+        footer = "[yellow](dry run — nothing saved)[/yellow]" if dry_run else f"Session #{session_id} complete."
         console.print(
-            f"\n[bold]Session #{session_id} complete.[/bold]  "
+            f"\n[bold]{footer}[/bold]  "
             f"Checked {total_checked} slices, found [green]{total_saved}[/green] unique tracks."
         )
 
@@ -814,7 +866,7 @@ async def _run_youtube(
 SOUNDCLOUD_SONG_DURATION_S = 15 * 60  # 15 minutes
 
 
-def _run_soundcloud_set(url: str) -> None:
+def _run_soundcloud_set(url: str, dry_run: bool = False) -> None:
     """Set URL → enumerate child tracks via metadata, save each one."""
     from .soundcloud import list_set_tracks
 
@@ -838,22 +890,25 @@ def _run_soundcloud_set(url: str) -> None:
         f"([cyan]{len(tracks)}[/cyan] tracks{skip_note}, no audio download)"
     )
 
-    prior = find_session(url)
-    if prior:
-        n_existing = len(tracks_for_session(prior["id"]))
-        scanned_on = prior["started_at"][:10]
-        console.print(
-            f"\n[dim]Already enumerated on {scanned_on} "
-            f"(session #{prior['id']}, {n_existing} track(s)).[/dim]\n"
-        )
-        if not _confirm("Re-enumerate?", default=False):
-            sys.exit(0)
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+    else:
+        prior = find_session(url)
+        if prior:
+            n_existing = len(tracks_for_session(prior["id"]))
+            scanned_on = prior["started_at"][:10]
+            console.print(
+                f"\n[dim]Already enumerated on {scanned_on} "
+                f"(session #{prior['id']}, {n_existing} track(s)).[/dim]\n"
+            )
+            if not _confirm("Re-enumerate?", default=False):
+                sys.exit(0)
 
-    total_duration = sum(t.get("duration") or 0 for t in tracks)
-    session_id = create_session("soundcloud", url, set_slug, set_slug, total_duration)
+        total_duration = sum(t.get("duration") or 0 for t in tracks)
+        session_id = create_session("soundcloud", url, set_slug, set_slug, total_duration)
 
-    insert_tracks(tracks, source="soundcloud", session_id=session_id)
-    end_session(session_id)
+        insert_tracks(tracks, source="soundcloud", session_id=session_id)
+        end_session(session_id)
 
     t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
     t.add_column("#",        style="dim", width=4)
@@ -864,35 +919,44 @@ def _run_soundcloud_set(url: str) -> None:
         dur = _fmt_time(tr.get("duration") or 0) if tr.get("duration") else "—"
         t.add_row(str(tr["position"]), tr["artist"], tr["title"], dur)
     console.print(t)
-    console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+    if dry_run:
+        console.print("\n[yellow](dry run — nothing saved)[/yellow]")
+    else:
+        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
 
 
-def _save_soundcloud_song(url: str, raw_title: str, uploader: str, duration: int) -> None:
+def _save_soundcloud_song(url: str, raw_title: str, uploader: str, duration: int, dry_run: bool = False) -> None:
     """Single short SoundCloud track → save metadata as one detected_tracks row."""
     from .soundcloud import parse_artist_title
     artist, title = parse_artist_title(raw_title, uploader)
 
-    prior = find_session(url)
-    if prior:
-        scanned_on = prior["started_at"][:10]
-        console.print(
-            f"\n[dim]Already saved on {scanned_on} (session #{prior['id']}).[/dim]\n"
-        )
-        if not _confirm("Save again?", default=False):
-            sys.exit(0)
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+    else:
+        prior = find_session(url)
+        if prior:
+            scanned_on = prior["started_at"][:10]
+            console.print(
+                f"\n[dim]Already saved on {scanned_on} (session #{prior['id']}).[/dim]\n"
+            )
+            if not _confirm("Save again?", default=False):
+                sys.exit(0)
 
     console.print(
         f"[green]✓[/green] Track: [bold]{artist}[/bold] — {title}  "
         f"[dim]({_fmt_time(duration)})[/dim]"
     )
 
-    session_id = create_session("soundcloud", url, raw_title or title, uploader or None, duration)
-    insert_tracks(
-        [{"position": 1, "artist": artist, "title": title}],
-        source="soundcloud", session_id=session_id,
-    )
-    end_session(session_id)
-    console.print(f"[dim]Saved to DB (session #{session_id})[/dim]")
+    if not dry_run:
+        session_id = create_session("soundcloud", url, raw_title or title, uploader or None, duration)
+        insert_tracks(
+            [{"position": 1, "artist": artist, "title": title}],
+            source="soundcloud", session_id=session_id,
+        )
+        end_session(session_id)
+        console.print(f"[dim]Saved to DB (session #{session_id})[/dim]")
+    else:
+        console.print("[yellow](dry run — nothing saved)[/yellow]")
 
 
 async def _run_soundcloud(
@@ -903,6 +967,7 @@ async def _run_soundcloud(
     json_output: bool,
     resume_session_id: int | None = None,
     resume_from: int = 0,
+    dry_run: bool = False,
 ) -> None:
     from .soundcloud import audio_duration, download_mix, resolve_mix
     from .radio import slice_audio
@@ -924,22 +989,28 @@ async def _run_soundcloud(
             f"→ ~{n_checks} slices (every {scan_interval}s, {capture_s}s each)"
         )
 
-    if resume_session_id is not None:
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+        session_id = -1
+        seen_keys: set[str] = set()
+        seen_base_keys: set[str] = set()
+        all_tracks: list[dict] = []
+    elif resume_session_id is not None:
         session_id = resume_session_id
         console.print(
             f"  [yellow]Resuming session [bold]#{session_id}[/bold] "
             f"from {_fmt_time(resume_from)}[/yellow]"
         )
         prior_tracks = tracks_for_session(session_id)
-        seen_keys: set[str] = {
+        seen_keys = {
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
-        seen_base_keys: set[str] = {
+        seen_base_keys = {
             f"{r['artist']}:{_base_title(r['title'])}"
             for r in prior_tracks if r["title"]
         }
-        all_tracks: list[dict] = [dict(r) for r in prior_tracks]
+        all_tracks = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("soundcloud", url, mix_title, uploader or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
@@ -989,7 +1060,8 @@ async def _run_soundcloud(
                     slice_audio(str(mix_path), pos, capture_s, slice_path)
                 except subprocess.CalledProcessError:
                     console.print(f"  {label} [red]slice failed[/red]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
 
                 try:
@@ -998,15 +1070,18 @@ async def _run_soundcloud(
                     track = format_result(raw)
                 except asyncio.TimeoutError:
                     console.print(f"  {label} [yellow]Shazam timeout ({RECOGNIZE_TIMEOUT}s)[/yellow]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
                 except Exception as exc:
                     console.print(f"  {label} [yellow]Shazam error: {exc}[/yellow]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
 
                 total_checked += 1
-                update_session_progress(session_id, pos)
+                if not dry_run:
+                    update_session_progress(session_id, pos)
 
                 if not track.get("title"):
                     console.print(f"  [dim]{label} not recognized[/dim]")
@@ -1021,7 +1096,8 @@ async def _run_soundcloud(
                 seen_keys.add(key)
                 seen_base_keys.add(base_key)
                 track["position"] = pos
-                insert_track(track, source="soundcloud", session_id=session_id)
+                if not dry_run:
+                    insert_track(track, source="soundcloud", session_id=session_id)
                 total_saved += 1
                 all_tracks.append(track)
                 am = track.get("apple_music_url") or ""
@@ -1034,9 +1110,11 @@ async def _run_soundcloud(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
     finally:
-        end_session(session_id)
+        if not dry_run:
+            end_session(session_id)
+        footer = "[yellow](dry run — nothing saved)[/yellow]" if dry_run else f"Session #{session_id} complete."
         console.print(
-            f"\n[bold]Session #{session_id} complete.[/bold]  "
+            f"\n[bold]{footer}[/bold]  "
             f"Checked {total_checked} slices, found [green]{total_saved}[/green] unique tracks."
         )
 
@@ -1065,6 +1143,7 @@ async def _run_podbean(
     json_output: bool,
     resume_session_id: int | None = None,
     resume_from: int = 0,
+    dry_run: bool = False,
 ) -> None:
     from .podbean import audio_duration, download_episode, resolve_episode
     from .radio import slice_audio
@@ -1086,22 +1165,28 @@ async def _run_podbean(
             f"→ ~{n_checks} slices (every {scan_interval}s, {capture_s}s each)"
         )
 
-    if resume_session_id is not None:
+    if dry_run:
+        console.print("  [yellow]Dry run — no DB writes[/yellow]")
+        session_id = -1
+        seen_keys: set[str] = set()
+        seen_base_keys: set[str] = set()
+        all_tracks: list[dict] = []
+    elif resume_session_id is not None:
         session_id = resume_session_id
         console.print(
             f"  [yellow]Resuming session [bold]#{session_id}[/bold] "
             f"from {_fmt_time(resume_from)}[/yellow]"
         )
         prior_tracks = tracks_for_session(session_id)
-        seen_keys: set[str] = {
+        seen_keys = {
             r["shazam_key"] or f"{r['artist']}:{r['title']}"
             for r in prior_tracks if r["shazam_key"] or r["title"]
         }
-        seen_base_keys: set[str] = {
+        seen_base_keys = {
             f"{r['artist']}:{_base_title(r['title'])}"
             for r in prior_tracks if r["title"]
         }
-        all_tracks: list[dict] = [dict(r) for r in prior_tracks]
+        all_tracks = [dict(r) for r in prior_tracks]
     else:
         session_id = create_session("podbean", url, episode_title, podcast_name or None, duration)
         console.print(f"  Session [bold]#{session_id}[/bold] started")
@@ -1151,7 +1236,8 @@ async def _run_podbean(
                     slice_audio(str(episode_path), pos, capture_s, slice_path)
                 except subprocess.CalledProcessError:
                     console.print(f"  {label} [red]slice failed[/red]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
 
                 try:
@@ -1160,15 +1246,18 @@ async def _run_podbean(
                     track = format_result(raw)
                 except asyncio.TimeoutError:
                     console.print(f"  {label} [yellow]Shazam timeout ({RECOGNIZE_TIMEOUT}s)[/yellow]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
                 except Exception as exc:
                     console.print(f"  {label} [yellow]Shazam error: {exc}[/yellow]")
-                    update_session_progress(session_id, pos)
+                    if not dry_run:
+                        update_session_progress(session_id, pos)
                     continue
 
                 total_checked += 1
-                update_session_progress(session_id, pos)
+                if not dry_run:
+                    update_session_progress(session_id, pos)
 
                 if not track.get("title"):
                     console.print(f"  [dim]{label} not recognized[/dim]")
@@ -1183,7 +1272,8 @@ async def _run_podbean(
                 seen_keys.add(key)
                 seen_base_keys.add(base_key)
                 track["position"] = pos
-                insert_track(track, source="podbean", session_id=session_id)
+                if not dry_run:
+                    insert_track(track, source="podbean", session_id=session_id)
                 total_saved += 1
                 all_tracks.append(track)
                 am = track.get("apple_music_url") or ""
@@ -1196,9 +1286,11 @@ async def _run_podbean(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
     finally:
-        end_session(session_id)
+        if not dry_run:
+            end_session(session_id)
+        footer = "[yellow](dry run — nothing saved)[/yellow]" if dry_run else f"Session #{session_id} complete."
         console.print(
-            f"\n[bold]Session #{session_id} complete.[/bold]  "
+            f"\n[bold]{footer}[/bold]  "
             f"Checked {total_checked} slices, found [green]{total_saved}[/green] unique tracks."
         )
 
@@ -1212,6 +1304,149 @@ async def _run_podbean(
     if output:
         Path(output).write_text(json.dumps(all_tracks, indent=2, ensure_ascii=False))
         console.print(f"\n[green]✓[/green] Saved to {output}")
+
+
+def _cmd_fix_session(args) -> None:
+    """Compare a confirmed tracklist (stdin) against detected tracks and remove mismatches."""
+    import sys
+    from difflib import SequenceMatcher
+    from .text import extract_from_text, _ID_LINE_RE, _TS_RE, _clean_line, _SEP_RE
+
+    session_id = args.session_id
+    threshold = args.threshold
+    apply = args.apply
+
+    # ── Load detected tracks ──────────────────────────────────────────────────
+    detected = tracks_for_session(session_id)
+    if not detected:
+        console.print(f"[yellow]No tracks found for session #{session_id}.[/yellow]")
+        return
+
+    # ── Read confirmed tracklist from stdin ───────────────────────────────────
+    if sys.stdin.isatty():
+        console.print(
+            f"\n[bold]Paste the confirmed tracklist, then press Ctrl-D when done.[/bold]\n"
+            f"[dim]Format: [HH:MM] TITLE - ARTIST   (or ARTIST - TITLE — both work)[/dim]\n"
+            f"[dim]Lines starting with 'ID' are skipped.[/dim]\n"
+        )
+    raw_text = sys.stdin.read()
+
+    # ── Parse confirmed lines (reuse text.py logic + extra ID filter) ─────────
+    def _norm(s: str) -> str:
+        s = re.sub(r"[\(\[{][^\)\]{}]*[\)\]{}]", " ", s)   # strip bracketed blocks
+        s = re.sub(r"[^\w\s]", " ", s.lower())
+        return re.sub(r"\s+", " ", s).strip()
+
+    confirmed: list[tuple[str, str]] = []   # (left, right) raw parts — order unknown
+    for raw_line in raw_text.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line or raw_line.startswith("#"):
+            continue
+        cleaned = _clean_line(raw_line)
+        if not cleaned:
+            continue
+        # Skip pure ID placeholders: "ID" or "ID - ID" or "ID (anything)"
+        if re.match(r"^ID\b", cleaned, re.IGNORECASE):
+            continue
+        m = _SEP_RE.search(cleaned)
+        if not m:
+            continue
+        left = cleaned[: m.start()].strip()
+        right = cleaned[m.end() :].strip()
+        if not left or not right:
+            continue
+        # Skip if either side is just "ID"
+        if left.upper() == "ID" or right.upper() == "ID":
+            continue
+        confirmed.append((left, right))
+
+    if not confirmed:
+        console.print("[yellow]No confirmed tracks parsed from input.[/yellow]")
+        return
+
+    # ── Score each detected track against all confirmed entries ───────────────
+    def _match_score(conf_left: str, conf_right: str, det_artist: str, det_title: str) -> float:
+        nl, nr = _norm(conf_left), _norm(conf_right)
+        na, nt = _norm(det_artist or ""), _norm(det_title or "")
+        # Try both orderings: conf as (title, artist) and conf as (artist, title)
+        score1 = 0.6 * SequenceMatcher(None, nl, nt).ratio() + 0.4 * SequenceMatcher(None, nr, na).ratio()
+        score2 = 0.6 * SequenceMatcher(None, nr, nt).ratio() + 0.4 * SequenceMatcher(None, nl, na).ratio()
+        return max(score1, score2)
+
+    # Build score matrix: scores[det_idx][conf_idx]
+    scores = [
+        [_match_score(cl, cr, d["artist"] or "", d["title"] or "") for (cl, cr) in confirmed]
+        for d in detected
+    ]
+
+    # Greedy assignment: pair each confirmed entry to its best unmatched detected track
+    confirmed_matched = [False] * len(confirmed)
+    det_to_conf: dict[int, int] = {}   # det_idx → conf_idx
+    det_scores: dict[int, float] = {}  # det_idx → score
+
+    # Collect all (score, det_idx, conf_idx) triples.
+    # Tiebreak by det_idx ascending (detected list is already ordered by position,
+    # so earlier tracks win when scores are identical).
+    triples = sorted(
+        [(scores[di][ci], -di, di, ci) for di in range(len(detected)) for ci in range(len(confirmed))],
+        reverse=True,
+    )
+    triples = [(sc, di, ci) for sc, _, di, ci in triples]
+    for score, di, ci in triples:
+        if di in det_to_conf or confirmed_matched[ci]:
+            continue
+        if score >= threshold:
+            det_to_conf[di] = ci
+            confirmed_matched[ci] = True
+            det_scores[di] = score
+
+    # ── Build keep / delete lists ─────────────────────────────────────────────
+    to_keep = [d for i, d in enumerate(detected) if i in det_to_conf]
+    to_delete = [d for i, d in enumerate(detected) if i not in det_to_conf]
+
+    # ── Render diff table ─────────────────────────────────────────────────────
+    console.print(f"\n[bold]Session #{session_id} — fix-session diff[/bold]\n")
+    t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+    t.add_column("Action", width=8)
+    t.add_column("ID", style="dim", width=6)
+    t.add_column("Artist", min_width=22)
+    t.add_column("Title", min_width=26)
+    t.add_column("Score", style="dim", width=6)
+
+    for i, d in enumerate(detected):
+        if i in det_to_conf:
+            sc = f"{det_scores[i]:.2f}"
+            t.add_row("[green]KEEP[/green]", str(d["id"]), d["artist"] or "—", d["title"] or "—", sc)
+        else:
+            best_sc = max(scores[i]) if confirmed else 0.0
+            t.add_row("[red]DELETE[/red]", str(d["id"]), d["artist"] or "—", d["title"] or "—",
+                      f"{best_sc:.2f}")
+
+    console.print(t)
+    console.print()
+
+    unmatched_conf = [(cl, cr) for j, (cl, cr) in enumerate(confirmed) if not confirmed_matched[j]]
+    if unmatched_conf:
+        console.print("[dim]Confirmed entries with no matching detected track (not added):[/dim]")
+        for cl, cr in unmatched_conf:
+            console.print(f"  [dim]{cl} - {cr}[/dim]")
+        console.print()
+
+    if not to_delete:
+        console.print("[green]Nothing to delete — session is already clean.[/green]")
+        return
+
+    console.print(f"[bold]{len(to_delete)} track(s) will be removed[/bold] from session #{session_id}.")
+
+    if not apply:
+        console.print("\n[dim]Dry-run — pass --apply to commit.[/dim]")
+        return
+
+    removed = remove_tracks_from_session(session_id, [d["id"] for d in to_delete])
+    console.print(
+        f"\n[green]✓[/green] Unlinked {len(to_delete)} track(s) from session #{session_id}; "
+        f"{len(removed)} fully deleted from detected_tracks."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1233,9 +1468,11 @@ Examples:
   uv run dj_cli.py detect youtube https://www.youtube.com/watch?v=XXXX
   uv run dj_cli.py detect podbean https://www.podbean.com/ew/pb-XXXX
   uv run dj_cli.py detect reddit https://www.reddit.com/r/HypeTracks/comments/XXXXX/
+  uv run dj_cli.py detect 1001tracklists https://www.1001tracklists.com/tracklist/XXXXX/
   uv run dj_cli.py detect history -n 50
   uv run dj_cli.py detect mixcloud-history
   uv run dj_cli.py detect reddit-history
+  uv run dj_cli.py detect 1001tracklists-history
 """,
     )
     sub = detect_p.add_subparsers(dest="detect_command")
@@ -1250,6 +1487,8 @@ Examples:
     ig_p.add_argument("--output", "-o", default=None, help="Write results to JSON file")
     ig_p.add_argument("--json", "-j", action="store_true", dest="json_output",
                       help="Print results as JSON to stdout")
+    ig_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # radio-garden
     rg_p = sub.add_parser("radio-garden", help="Monitor a radio.garden station")
@@ -1262,6 +1501,8 @@ Examples:
                       help="Total minutes to monitor (0 = run until Ctrl+C)")
     rg_p.add_argument("--cooldown", type=int, default=600,
                       help="Seconds before same track can be saved again (default: 600)")
+    rg_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # mixcloud
     mc_p = sub.add_parser("mixcloud", help="Scan a Mixcloud mix and identify tracks")
@@ -1275,6 +1516,8 @@ Examples:
     mc_p.add_argument("--output", "-o", default=None, help="Write tracklist to JSON file")
     mc_p.add_argument("--json", "-j", action="store_true", dest="json_output",
                       help="Print tracklist as JSON to stdout")
+    mc_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # youtube
     yt_p = sub.add_parser("youtube", help="Scan a YouTube video and identify tracks")
@@ -1286,6 +1529,8 @@ Examples:
     yt_p.add_argument("--output", "-o", default=None, help="Write tracklist to JSON file")
     yt_p.add_argument("--json", "-j", action="store_true", dest="json_output",
                       help="Print tracklist as JSON to stdout")
+    yt_p.add_argument("--dry-run", action="store_true",
+                      help="Run Shazam recognition but skip all DB writes")
 
     # soundcloud
     sc_p = sub.add_parser("soundcloud", help="Scan a SoundCloud mix and identify tracks")
@@ -1297,6 +1542,8 @@ Examples:
     sc_p.add_argument("--output", "-o", default=None, help="Write tracklist to JSON file")
     sc_p.add_argument("--json", "-j", action="store_true", dest="json_output",
                       help="Print tracklist as JSON to stdout")
+    sc_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # podbean
     pb_p = sub.add_parser("podbean", help="Scan a Podbean episode and identify tracks")
@@ -1308,10 +1555,14 @@ Examples:
     pb_p.add_argument("--output", "-o", default=None, help="Write tracklist to JSON file")
     pb_p.add_argument("--json", "-j", action="store_true", dest="json_output",
                       help="Print tracklist as JSON to stdout")
+    pb_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # reddit
     rd_p = sub.add_parser("reddit", help="Extract tracks from a Reddit text post")
     rd_p.add_argument("url", help="Reddit post URL")
+    rd_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # reddit-history
     rd_hist_p = sub.add_parser("reddit-history", help="Browse Reddit post scans")
@@ -1325,6 +1576,8 @@ Examples:
     # topdjmixes
     td_p = sub.add_parser("topdjmixes", help="Extract tracks from a topdjmixes.com mix page")
     td_p.add_argument("url", help="topdjmixes.com mix URL")
+    td_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # topdjmixes-history
     td_hist_p = sub.add_parser("topdjmixes-history", help="Browse topdjmixes mix scans")
@@ -1336,9 +1589,29 @@ Examples:
     td_del_p.add_argument("session_id", type=int)
     td_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
 
+    # 1001tracklists
+    tl_p = sub.add_parser("1001tracklists", help="Extract tracks from a 1001tracklists.com tracklist page")
+    tl_p.add_argument("url", help="1001tracklists.com tracklist URL")
+    tl_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
+
+    # 1001tracklists-history
+    tl_hist_p = sub.add_parser("1001tracklists-history", help="Browse 1001tracklists scans")
+    tl_hist_p.add_argument("-n", "--limit", type=int, default=20)
+
+    # 1001tracklists-delete-session
+    tl_del_p = sub.add_parser("1001tracklists-delete-session",
+                               help="Delete a 1001tracklists session and its tracks")
+    tl_del_p.add_argument("session_id", type=int)
+    tl_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
+
     # text
     tx_p = sub.add_parser("text", help="Extract tracks from pasted text (no URL needed)")
     tx_p.add_argument("name", help="Session name / label for this tracklist")
+    tx_p.add_argument("--url", default=None,
+                      help="Associate a real URL with this session (e.g. the YouTube link)")
+    tx_p.add_argument("--dry-run", action="store_true",
+                      help="Run detection but skip all DB writes")
 
     # text-history
     tx_hist_p = sub.add_parser("text-history", help="Browse text-paste sessions")
@@ -1411,6 +1684,21 @@ Examples:
                         default=None, help="Max track age: 1mo / 6mo / 1yr / 3yr")
     gems_p.add_argument("--no-save", action="store_true", dest="no_save",
                         help="Don't persist results to the DB (testing only)")
+
+    # fix-session
+    fs_p = sub.add_parser(
+        "fix-session",
+        help="Correct a session's detected tracks using a confirmed tracklist from stdin",
+    )
+    fs_p.add_argument("session_id", type=int, help="Session ID to correct")
+    fs_p.add_argument(
+        "--apply", action="store_true",
+        help="Actually delete wrong tracks (default: dry-run only)",
+    )
+    fs_p.add_argument(
+        "--threshold", type=float, default=0.75, metavar="F",
+        help="Fuzzy match threshold for keeping a detected track (default: 0.75)",
+    )
 
     # login-instagram
     li_p = sub.add_parser("login-instagram", help="Save Instagram credentials and verify login")
@@ -1497,8 +1785,22 @@ Examples:
                        help="Re-ingest even if rekordbox_analysis_at is already set")
     ira_p.add_argument("--verbose", "-v", action="store_true")
 
+    # spotify
+    sp_p = sub.add_parser("spotify", help="Import tracks from a Spotify playlist into detected_tracks")
+    sp_p.add_argument("url_or_name", help="Spotify playlist URL or playlist name to search for")
+
+    # spotify-history
+    sp_hist_p = sub.add_parser("spotify-history", help="Browse Spotify playlist imports")
+    sp_hist_p.add_argument("-n", "--limit", type=int, default=10)
+
+    # spotify-delete-session
+    sp_del_p = sub.add_parser("spotify-delete-session",
+                              help="Delete a Spotify playlist session and its tracks")
+    sp_del_p.add_argument("session_id", type=int)
+    sp_del_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation prompt")
+
     # sessions
-    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit", "topdjmixes", "soundcloud", "text")
+    _TYPES = ("youtube", "instagram", "mixcloud", "radio", "podbean", "reddit", "topdjmixes", "soundcloud", "text", "spotify", "1001tracklists")
     sess_p = sub.add_parser(
         "sessions",
         help="List all sessions for a source type, or detected tracks for one session",
@@ -1552,19 +1854,23 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
     if cmd == "reddit":
         url = args.url
-        prior = find_session(url)
-        if prior:
-            n_tracks = len(tracks_for_session(prior["id"]))
-            console.print(
-                f"\n[dim]This post was already scanned (session #{prior['id']}, "
-                f"{n_tracks} track(s) found).[/dim]\n"
-            )
-            if not _confirm("Scan again?", default=False):
-                sys.exit(0)
+        if not args.dry_run:
+            prior = find_session(url)
+            if prior:
+                n_tracks = len(tracks_for_session(prior["id"]))
+                console.print(
+                    f"\n[dim]This post was already scanned (session #{prior['id']}, "
+                    f"{n_tracks} track(s) found).[/dim]\n"
+                )
+                if not _confirm("Scan again?", default=False):
+                    sys.exit(0)
 
         # Extract subreddit from URL for display
         sr_m = __import__("re").search(r"/r/([^/?#]+)", url)
         subreddit = sr_m.group(1) if sr_m else "reddit"
+
+        if args.dry_run:
+            console.print("  [yellow]Dry run — no DB writes[/yellow]")
 
         console.print(
             f"\n[bold]Paste the post body into vi, then save and quit (:wq).[/bold]\n"
@@ -1588,13 +1894,16 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
         # Derive a title from the URL slug
         slug = url.rstrip("/").split("/")[-1].replace("_", " ").title()
-        session_id = create_session(
-            "reddit", url, slug,
-            uploader=subreddit,
-        )
-        insert_tracks(tracks, source="reddit", session_id=session_id)
-        end_session(session_id)
-        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        if not args.dry_run:
+            session_id = create_session(
+                "reddit", url, slug,
+                uploader=subreddit,
+            )
+            insert_tracks(tracks, source="reddit", session_id=session_id)
+            end_session(session_id)
+            console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        else:
+            console.print("\n[yellow](dry run — nothing saved)[/yellow]")
 
     elif cmd == "reddit-history":
         sessions = list_sessions("reddit", args.limit)
@@ -1627,18 +1936,22 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
     elif cmd == "topdjmixes":
         url = args.url
-        prior = find_session(url)
-        if prior:
-            n_tracks = len(tracks_for_session(prior["id"]))
-            console.print(
-                f"\n[dim]This mix was already scanned (session #{prior['id']}, "
-                f"{n_tracks} track(s) found).[/dim]\n"
-            )
-            if not _confirm("Scan again?", default=False):
-                sys.exit(0)
+        if not args.dry_run:
+            prior = find_session(url)
+            if prior:
+                n_tracks = len(tracks_for_session(prior["id"]))
+                console.print(
+                    f"\n[dim]This mix was already scanned (session #{prior['id']}, "
+                    f"{n_tracks} track(s) found).[/dim]\n"
+                )
+                if not _confirm("Scan again?", default=False):
+                    sys.exit(0)
 
         slug = url.rstrip("/").split("/")[-1] or "topdjmixes"
         dj_name = slug.replace("-", " ").replace("_", " ").title()
+
+        if args.dry_run:
+            console.print("  [yellow]Dry run — no DB writes[/yellow]")
 
         console.print(
             f"\n[bold]Paste the topdjmixes.com tracklist into vi, then save and quit (:wq).[/bold]\n"
@@ -1660,13 +1973,16 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             t.add_row(str(tr["position"]), tr["artist"], tr["title"])
         console.print(t)
 
-        session_id = create_session(
-            "topdjmixes", url, dj_name,
-            uploader=dj_name,
-        )
-        insert_tracks(tracks, source="topdjmixes", session_id=session_id)
-        end_session(session_id)
-        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        if not args.dry_run:
+            session_id = create_session(
+                "topdjmixes", url, dj_name,
+                uploader=dj_name,
+            )
+            insert_tracks(tracks, source="topdjmixes", session_id=session_id)
+            end_session(session_id)
+            console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        else:
+            console.print("\n[yellow](dry run — nothing saved)[/yellow]")
 
     elif cmd == "topdjmixes-history":
         sessions = list_sessions("topdjmixes", args.limit)
@@ -1697,11 +2013,100 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
         n = delete_session(session_id)
         console.print(f"[green]Deleted session #{session_id}.[/green]")
 
+    elif cmd == "1001tracklists":
+        url = args.url
+        if not args.dry_run:
+            prior = find_session(url)
+            if prior:
+                console.print(
+                    f"[yellow]Already scanned:[/yellow] {prior['title'] or url} "
+                    f"(session #{prior['id']}, {prior['track_count']} tracks)"
+                )
+                if not _confirm("Scan again?", default=False):
+                    sys.exit(0)
+
+        if args.dry_run:
+            console.print("  [yellow]Dry run — no DB writes[/yellow]")
+
+        console.print(
+            f"\n[bold]Paste the 1001tracklists.com tracklist into vi, then save and quit (:wq).[/bold]\n"
+            f"[dim]URL: {url}[/dim]\n"
+        )
+        raw_text = tracklists1001_open_editor(url)
+
+        tracks, skipped = tracklists1001_extract_from_text(raw_text)
+        if not tracks:
+            console.print("[yellow]No tracks found — nothing saved.[/yellow]")
+            if skipped:
+                console.print(f"\n[dim]Skipped {len(skipped)} unparseable line(s):[/dim]")
+                for s in skipped:
+                    console.print(f"  [dim]  {s}[/dim]")
+            sys.exit(0)
+
+        title = tracklists1001_extract_title(raw_text)
+        dj_name = title or url.rstrip("/").split("/")[-1].replace("-", " ").replace("_", " ").title()
+
+        console.print(f"\n[bold]Found {len(tracks)} track(s) from \"{dj_name}\":[/bold]\n")
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("#",      style="dim", width=4)
+        t.add_column("Artist", min_width=22)
+        t.add_column("Title",  min_width=30)
+        for tk in tracks:
+            t.add_row(str(tk["position"]), tk["artist"], tk["title"])
+        console.print(t)
+
+        if skipped:
+            console.print(f"\n[yellow]Skipped {len(skipped)} line(s) (no ' - ' separator or too long):[/yellow]")
+            for s in skipped:
+                console.print(f"  [dim]{s}[/dim]")
+
+        if not args.dry_run:
+            session_id = create_session("1001tracklists", url, dj_name, uploader=dj_name)
+            for tk in tracks:
+                tk_copy = dict(tk)
+                if tk_copy.get("timestamp_s") is not None:
+                    tk_copy["position"] = tk_copy["timestamp_s"]
+                insert_track(tk_copy, source="1001tracklists", session_id=session_id)
+            end_session(session_id)
+            console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        else:
+            console.print("\n[yellow](dry run — nothing saved)[/yellow]")
+
+    elif cmd == "1001tracklists-history":
+        sessions = list_sessions("1001tracklists", args.limit)
+        if not sessions:
+            console.print("[dim]No 1001tracklists sessions yet.[/dim]")
+            return
+        t = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        t.add_column("ID",      style="dim", width=5)
+        t.add_column("Title",   min_width=44)
+        t.add_column("Scanned", style="dim", width=19)
+        t.add_column("Tracks",  style="dim", width=7)
+        for r in sessions:
+            t.add_row(str(r["id"]), r["title"] or "—", r["started_at"][:19], str(r["track_count"]))
+        console.print(t)
+
+    elif cmd == "1001tracklists-delete-session":
+        session_id = args.session_id
+        rows = tracks_for_session(session_id)
+        if not rows:
+            console.print(f"[yellow]Session #{session_id} not found.[/yellow]")
+            sys.exit(1)
+        if not args.force:
+            console.print(f"[yellow]Delete 1001tracklists session #{session_id} ({len(rows)} track(s))?[/yellow]")
+            if not _confirm("Confirm delete", default=False):
+                sys.exit(0)
+        n = delete_session(session_id)
+        console.print(f"[green]Deleted session #{session_id}.[/green]")
+
     elif cmd == "text":
         name = args.name
         slug = __import__("re").sub(r"[^a-z0-9_-]", "_", name.lower())[:60]
         ts = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y%m%d_%H%M%S")
-        fake_url = f"text://{slug}-{ts}"
+        fake_url = args.url if getattr(args, "url", None) else f"text://{slug}-{ts}"
+
+        if args.dry_run:
+            console.print("  [yellow]Dry run — no DB writes[/yellow]")
 
         console.print(
             f"\n[bold]Paste your tracklist into vi, then save and quit (:wq).[/bold]\n"
@@ -1732,16 +2137,19 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             for s in skipped:
                 console.print(f"  [dim]{s}[/dim]")
 
-        session_id = create_session("text", fake_url, name, uploader=name)
-        # Use timestamp_s as position when available so w/ overlays share
-        # their parent track's timestamp. Falls back to sequential position.
-        for tk in tracks:
-            tk_copy = dict(tk)
-            if tk_copy.get("timestamp_s") is not None:
-                tk_copy["position"] = tk_copy["timestamp_s"]
-            insert_track(tk_copy, source="text", session_id=session_id)
-        end_session(session_id)
-        console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        if not args.dry_run:
+            session_id = create_session("text", fake_url, name, uploader=name)
+            # Use timestamp_s as position when available so w/ overlays share
+            # their parent track's timestamp. Falls back to sequential position.
+            for tk in tracks:
+                tk_copy = dict(tk)
+                if tk_copy.get("timestamp_s") is not None:
+                    tk_copy["position"] = tk_copy["timestamp_s"]
+                insert_track(tk_copy, source="text", session_id=session_id)
+            end_session(session_id)
+            console.print(f"\n[dim]Saved to DB (session #{session_id})[/dim]")
+        else:
+            console.print("\n[yellow](dry run — nothing saved)[/yellow]")
 
     elif cmd == "text-history":
         sessions = list_sessions("text", args.limit)
@@ -1778,7 +2186,8 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             username = input("Instagram username: ")
         if not password:
             password = getpass.getpass("Instagram password: ")
-        asyncio.run(_run(args.url, username, password, args.output, args.json_output))
+        asyncio.run(_run(args.url, username, password, args.output, args.json_output,
+                         dry_run=args.dry_run))
 
     elif cmd == "radio-garden":
         if args.capture >= args.interval:
@@ -1786,7 +2195,8 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             sys.exit(1)
         with caffeinate():
             asyncio.run(_run_radio(args.url, interval=args.interval, capture_s=args.capture,
-                                   duration_min=args.duration, cooldown=args.cooldown))
+                                   duration_min=args.duration, cooldown=args.cooldown,
+                                   dry_run=args.dry_run))
 
     elif cmd == "mixcloud":
         if args.capture >= args.interval:
@@ -1798,41 +2208,43 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
         resume_session_id: int | None = None
         resume_from: int = 0
-        prior = find_session(args.url)
-        if prior:
-            n_tracks = len(tracks_for_session(prior["id"]))
-            last_pos = prior["last_scanned_position"]
-            dur = prior["duration_seconds"] or 0
-            if last_pos is None and n_tracks:
-                last_pos = infer_last_position(prior["id"])
-            is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
-            if is_partial:
-                note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
-                console.print(
-                    f"\n[yellow]Found an incomplete session (#{prior['id']}) for this mix.[/yellow]\n"
-                    f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
-                )
-                if _confirm("Resume from where it left off?", default=True):
-                    resume_session_id = prior["id"]
-                    resume_from = last_pos
-                    if prior["last_scanned_position"] is None:
-                        update_session_progress(prior["id"], last_pos)
+        if not args.dry_run:
+            prior = find_session(args.url)
+            if prior:
+                n_tracks = len(tracks_for_session(prior["id"]))
+                last_pos = prior["last_scanned_position"]
+                dur = prior["duration_seconds"] or 0
+                if last_pos is None and n_tracks:
+                    last_pos = infer_last_position(prior["id"])
+                is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
+                if is_partial:
+                    note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
+                    console.print(
+                        f"\n[yellow]Found an incomplete session (#{prior['id']}) for this mix.[/yellow]\n"
+                        f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
+                    )
+                    if _confirm("Resume from where it left off?", default=True):
+                        resume_session_id = prior["id"]
+                        resume_from = last_pos
+                        if prior["last_scanned_position"] is None:
+                            update_session_progress(prior["id"], last_pos)
+                    else:
+                        console.print("")
                 else:
+                    scanned_on = prior["started_at"][:10]
+                    console.print(
+                        f"\n[dim]This mix was already scanned on {scanned_on} "
+                        f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
+                    )
+                    if not _confirm("Scan again from the beginning?", default=False):
+                        sys.exit(0)
                     console.print("")
-            else:
-                scanned_on = prior["started_at"][:10]
-                console.print(
-                    f"\n[dim]This mix was already scanned on {scanned_on} "
-                    f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
-                )
-                if not _confirm("Scan again from the beginning?", default=False):
-                    sys.exit(0)
-                console.print("")
 
         asyncio.run(_run_mixcloud(
             args.url, username, password, args.interval, args.capture,
             args.output, args.json_output,
             resume_session_id=resume_session_id, resume_from=resume_from,
+            dry_run=args.dry_run,
         ))
 
     elif cmd == "youtube":
@@ -1842,39 +2254,41 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
         resume_session_id = None
         resume_from = 0
-        prior = find_session(args.url)
-        if prior:
-            n_tracks = len(tracks_for_session(prior["id"]))
-            last_pos = prior["last_scanned_position"]
-            dur = prior["duration_seconds"] or 0
-            if last_pos is None and n_tracks:
-                last_pos = infer_last_position(prior["id"])
-            is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
-            if is_partial:
-                note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
-                console.print(
-                    f"\n[yellow]Found an incomplete session (#{prior['id']}) for this video.[/yellow]\n"
-                    f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
-                )
-                if _confirm("Resume from where it left off?", default=True):
-                    resume_session_id = prior["id"]
-                    resume_from = last_pos
-                    if prior["last_scanned_position"] is None:
-                        update_session_progress(prior["id"], last_pos)
+        if not args.dry_run:
+            prior = find_session(args.url)
+            if prior:
+                n_tracks = len(tracks_for_session(prior["id"]))
+                last_pos = prior["last_scanned_position"]
+                dur = prior["duration_seconds"] or 0
+                if last_pos is None and n_tracks:
+                    last_pos = infer_last_position(prior["id"])
+                is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
+                if is_partial:
+                    note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
+                    console.print(
+                        f"\n[yellow]Found an incomplete session (#{prior['id']}) for this video.[/yellow]\n"
+                        f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
+                    )
+                    if _confirm("Resume from where it left off?", default=True):
+                        resume_session_id = prior["id"]
+                        resume_from = last_pos
+                        if prior["last_scanned_position"] is None:
+                            update_session_progress(prior["id"], last_pos)
+                    else:
+                        console.print("")
                 else:
+                    scanned_on = prior["started_at"][:10]
+                    console.print(
+                        f"\n[dim]This video was already scanned on {scanned_on} "
+                        f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
+                    )
+                    if not _confirm("Scan again from the beginning?", default=False):
+                        sys.exit(0)
                     console.print("")
-            else:
-                scanned_on = prior["started_at"][:10]
-                console.print(
-                    f"\n[dim]This video was already scanned on {scanned_on} "
-                    f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
-                )
-                if not _confirm("Scan again from the beginning?", default=False):
-                    sys.exit(0)
-                console.print("")
 
         asyncio.run(_run_youtube(args.url, args.interval, args.capture, args.output, args.json_output,
-                                 resume_session_id=resume_session_id, resume_from=resume_from))
+                                 resume_session_id=resume_session_id, resume_from=resume_from,
+                                 dry_run=args.dry_run))
 
     elif cmd == "soundcloud":
         from connections import soundcloud as sc_api
@@ -1892,7 +2306,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
         # Set → enumerate child tracks (no audio scan, no Shazam)
         if sc_is_set_url(url) or sc_is_personalized_url(url):
-            _run_soundcloud_set(url)
+            _run_soundcloud_set(url, dry_run=args.dry_run)
             return
 
         # Single track → peek at duration to decide between single-song
@@ -1905,7 +2319,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                 sys.exit(1)
 
         if duration and duration <= SOUNDCLOUD_SONG_DURATION_S:
-            _save_soundcloud_song(url, track_title, uploader, duration)
+            _save_soundcloud_song(url, track_title, uploader, duration, dry_run=args.dry_run)
             return
 
         # Long single track → DJ mix → Shazam-scan the audio
@@ -1915,39 +2329,41 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
         resume_session_id = None
         resume_from = 0
-        prior = find_session(url)
-        if prior:
-            n_tracks = len(tracks_for_session(prior["id"]))
-            last_pos = prior["last_scanned_position"]
-            dur = prior["duration_seconds"] or 0
-            if last_pos is None and n_tracks:
-                last_pos = infer_last_position(prior["id"])
-            is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
-            if is_partial:
-                note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
-                console.print(
-                    f"\n[yellow]Found an incomplete session (#{prior['id']}) for this mix.[/yellow]\n"
-                    f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
-                )
-                if _confirm("Resume from where it left off?", default=True):
-                    resume_session_id = prior["id"]
-                    resume_from = last_pos
-                    if prior["last_scanned_position"] is None:
-                        update_session_progress(prior["id"], last_pos)
+        if not args.dry_run:
+            prior = find_session(url)
+            if prior:
+                n_tracks = len(tracks_for_session(prior["id"]))
+                last_pos = prior["last_scanned_position"]
+                dur = prior["duration_seconds"] or 0
+                if last_pos is None and n_tracks:
+                    last_pos = infer_last_position(prior["id"])
+                is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
+                if is_partial:
+                    note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
+                    console.print(
+                        f"\n[yellow]Found an incomplete session (#{prior['id']}) for this mix.[/yellow]\n"
+                        f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
+                    )
+                    if _confirm("Resume from where it left off?", default=True):
+                        resume_session_id = prior["id"]
+                        resume_from = last_pos
+                        if prior["last_scanned_position"] is None:
+                            update_session_progress(prior["id"], last_pos)
+                    else:
+                        console.print("")
                 else:
+                    scanned_on = prior["started_at"][:10]
+                    console.print(
+                        f"\n[dim]This mix was already scanned on {scanned_on} "
+                        f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
+                    )
+                    if not _confirm("Scan again from the beginning?", default=False):
+                        sys.exit(0)
                     console.print("")
-            else:
-                scanned_on = prior["started_at"][:10]
-                console.print(
-                    f"\n[dim]This mix was already scanned on {scanned_on} "
-                    f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
-                )
-                if not _confirm("Scan again from the beginning?", default=False):
-                    sys.exit(0)
-                console.print("")
 
         asyncio.run(_run_soundcloud(url, args.interval, args.capture, args.output, args.json_output,
-                                    resume_session_id=resume_session_id, resume_from=resume_from))
+                                    resume_session_id=resume_session_id, resume_from=resume_from,
+                                    dry_run=args.dry_run))
 
     elif cmd == "podbean":
         if args.capture >= args.interval:
@@ -1956,39 +2372,41 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
 
         resume_session_id = None
         resume_from = 0
-        prior = find_session(args.url)
-        if prior:
-            n_tracks = len(tracks_for_session(prior["id"]))
-            last_pos = prior["last_scanned_position"]
-            dur = prior["duration_seconds"] or 0
-            if last_pos is None and n_tracks:
-                last_pos = infer_last_position(prior["id"])
-            is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
-            if is_partial:
-                note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
-                console.print(
-                    f"\n[yellow]Found an incomplete session (#{prior['id']}) for this episode.[/yellow]\n"
-                    f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
-                )
-                if _confirm("Resume from where it left off?", default=True):
-                    resume_session_id = prior["id"]
-                    resume_from = last_pos
-                    if prior["last_scanned_position"] is None:
-                        update_session_progress(prior["id"], last_pos)
+        if not args.dry_run:
+            prior = find_session(args.url)
+            if prior:
+                n_tracks = len(tracks_for_session(prior["id"]))
+                last_pos = prior["last_scanned_position"]
+                dur = prior["duration_seconds"] or 0
+                if last_pos is None and n_tracks:
+                    last_pos = infer_last_position(prior["id"])
+                is_partial = last_pos is not None and (not dur or last_pos < dur - args.interval)
+                if is_partial:
+                    note = " (position inferred from tracks)" if prior["last_scanned_position"] is None else ""
+                    console.print(
+                        f"\n[yellow]Found an incomplete session (#{prior['id']}) for this episode.[/yellow]\n"
+                        f"  Last scanned: [bold]{_fmt_time(last_pos)}[/bold]{note}  ·  {n_tracks} track(s) found so far\n"
+                    )
+                    if _confirm("Resume from where it left off?", default=True):
+                        resume_session_id = prior["id"]
+                        resume_from = last_pos
+                        if prior["last_scanned_position"] is None:
+                            update_session_progress(prior["id"], last_pos)
+                    else:
+                        console.print("")
                 else:
+                    scanned_on = prior["started_at"][:10]
+                    console.print(
+                        f"\n[dim]This episode was already scanned on {scanned_on} "
+                        f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
+                    )
+                    if not _confirm("Scan again from the beginning?", default=False):
+                        sys.exit(0)
                     console.print("")
-            else:
-                scanned_on = prior["started_at"][:10]
-                console.print(
-                    f"\n[dim]This episode was already scanned on {scanned_on} "
-                    f"({n_tracks} track(s) found, session #{prior['id']}).[/dim]\n"
-                )
-                if not _confirm("Scan again from the beginning?", default=False):
-                    sys.exit(0)
-                console.print("")
 
         asyncio.run(_run_podbean(args.url, args.interval, args.capture, args.output, args.json_output,
-                                 resume_session_id=resume_session_id, resume_from=resume_from))
+                                 resume_session_id=resume_session_id, resume_from=resume_from,
+                                 dry_run=args.dry_run))
 
     elif cmd == "history":
         rows = list_tracks(args.limit)
@@ -2297,6 +2715,51 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             no_save=args.no_save,
         )
 
+    elif cmd == "spotify":
+        from detect.spotify import run_spotify_playlist
+        run_spotify_playlist(args.url_or_name)
+
+    elif cmd == "spotify-history":
+        rows = list_sessions("spotify", args.limit)
+        if not rows:
+            console.print("[dim]No Spotify sessions yet. Run [bold]dj detect spotify <url-or-name>[/bold] to start.[/dim]")
+            return
+        for s in rows:
+            ended = s["ended_at"][:19] if s["ended_at"] else "ongoing"
+            console.print(
+                f"\n[bold cyan]Session #{s['id']}[/bold cyan]  [bold]{s['title']}[/bold]\n"
+                f"  [dim]owner:[/dim] {s['uploader'] or '?'}  "
+                f"[dim]imported:[/dim] {s['started_at'][:19]}  [dim]ended:[/dim] {ended}  "
+                f"[dim]tracks:[/dim] {s['track_count']}"
+            )
+            tracks = tracks_for_session(s["id"])
+            if tracks:
+                t = Table(show_header=False, box=None, padding=(0, 3))
+                t.add_column("#", style="dim", width=4)
+                t.add_column("Artist", min_width=22)
+                t.add_column("Title", min_width=28)
+                for r in tracks:
+                    t.add_row(str(r["position"] or "—"), r["artist"] or "—", r["title"] or "—")
+                console.print(t)
+            else:
+                console.print("  [dim](no tracks)[/dim]")
+
+    elif cmd == "spotify-delete-session":
+        rows = list_sessions("spotify", 100)
+        session = next((r for r in rows if r["id"] == args.session_id), None)
+        if not session:
+            console.print(f"[red]Session #{args.session_id} not found.[/red]")
+            sys.exit(1)
+        n_tracks = len(tracks_for_session(args.session_id))
+        console.print(
+            f"Session #{args.session_id}: [bold]{session['title']}[/bold]  "
+            f"({n_tracks} track(s), imported {session['started_at'][:10]})"
+        )
+        if not args.force and not _confirm("Delete this session and its tracks?", default=False):
+            sys.exit(0)
+        delete_session(args.session_id)
+        console.print(f"[green]✓[/green] Deleted session #{args.session_id} and {n_tracks} track(s).")
+
     elif cmd == "enrich":
         from detect.enrich import run_enrich
         run_enrich(
@@ -2396,7 +2859,8 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
             extra_label = {"radio": "Station", "mixcloud": "Uploader",
                            "youtube": "Uploader", "podbean": "Podcast",
                            "reddit": "Subreddit", "topdjmixes": "DJ",
-                           "soundcloud": "Uploader", "text": "Name"}[args.type]
+                           "soundcloud": "Uploader", "text": "Name",
+                           "1001tracklists": "DJ"}[args.type]
             t.add_column("ID", style="dim", width=5)
             t.add_column("Title", min_width=32)
             t.add_column(extra_label, min_width=18)
@@ -2483,7 +2947,7 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                 return "—"
             if session_type in ("instagram", "reddit", "topdjmixes"):
                 return f"#{pos}"
-            if session_type == "text":
+            if session_type in ("text", "1001tracklists"):
                 return _fmt_time(pos) if pos >= 60 else f"#{pos}"
             return _fmt_time(pos)
 
@@ -2518,3 +2982,6 @@ def dispatch(args, detect_p: argparse.ArgumentParser) -> None:
                       released, bp_id, bp_link, mik_key, mik_nrg)
         console.print(t)
         console.print(f"\n[dim]{len(rows)} tracks[/dim]")
+
+    elif cmd == "fix-session":
+        _cmd_fix_session(args)
