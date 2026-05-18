@@ -98,11 +98,25 @@ def _get_token() -> str:
 
 
 def _try_refresh() -> Optional[str]:
-    """Try to refresh the access token via the NextAuth session cookie."""
+    """Try to refresh the access token via the NextAuth session cookie.
+
+    Matches the --cookie login flow: reads session from os.environ with a
+    fallback to the .env file directly (so callers that didn't call
+    load_dotenv still work), then saves the refreshed token back to .env.
+    """
     session_cookie = os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
     if not session_cookie:
+        try:
+            from dotenv import dotenv_values
+            session_cookie = dotenv_values(".env").get("BEATPORT_SESSION_TOKEN", "").strip()
+        except Exception:
+            pass
+    if not session_cookie:
         return None
-    return bp_api.refresh_via_session(session_cookie)
+    new_token = bp_api.refresh_via_session(session_cookie)
+    if new_token:
+        bp_api.save_token_to_env(new_token)
+    return new_token
 
 
 def _bp_meta(match: dict) -> dict:
