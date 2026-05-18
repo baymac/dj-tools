@@ -154,22 +154,19 @@ def run_enrich(
 
     def on_401() -> None:
         nonlocal token
-        new_token = _try_refresh()
-        if new_token:
-            console.print("[dim]Token refreshed.[/dim]")
-            token = new_token
-            http_client.headers["authorization"] = token
-            bp_api.save_token_to_env(token)
-        else:
-            raise bp_api.AuthExpiredError(
-                "Beatport token expired and session refresh failed.\n"
-                "The session cookie's refresh token has been rotated — get fresh tokens:\n"
-                "  1. Open beatport.com (logged in)\n"
-                "  2. DevTools → Network → /api/auth/session → copy token.accessToken\n"
-                "     → set as BEATPORT_ACCESS_TOKEN in .env\n"
-                "  3. DevTools → Application → Cookies → copy __Secure-next-auth.session-token\n"
-                "     → set as BEATPORT_SESSION_TOKEN in .env"
-            )
+        import time as _t
+        for attempt in range(1, 3):
+            new_token = _try_refresh()
+            if new_token:
+                console.print("[dim]Token refreshed.[/dim]")
+                token = new_token
+                http_client.headers["authorization"] = token
+                bp_api.save_token_to_env(token)
+                return
+            if attempt < 2:
+                console.print(f"[dim]Session refresh failed (attempt {attempt}/2) — retrying in 3s…[/dim]")
+                _t.sleep(3)
+        raise bp_api.AuthExpiredError("session refresh failed after 2 attempts")
 
     beatport = bp_api.Beatport(client=http_client, on_401=on_401)
 
@@ -238,16 +235,12 @@ def run_enrich(
             query = f"{artist_query} {search_query(title)}"
             try:
                 results = beatport.search_tracks(query, per_page=10, debug=verbose)
-            except bp_api.AuthExpiredError as e:
+            except bp_api.AuthExpiredError:
                 progress.stop()
-                console.print(f"\n[red]Auth failed:[/red] {e}")
                 console.print(
-                    "Get fresh tokens:\n"
-                    "  1. Open beatport.com in a browser (logged in)\n"
-                    "  2. DevTools → Network → /api/auth/session → copy [bold]token.accessToken[/bold]\n"
-                    "     → set as BEATPORT_ACCESS_TOKEN in .env\n"
-                    "  3. DevTools → Application → Cookies → copy [bold]__Secure-next-auth.session-token[/bold]\n"
-                    "     → set as BEATPORT_SESSION_TOKEN in .env"
+                    "\n[red]Auth failed:[/red] Beatport session refresh failed after retrying.\n"
+                    "Run [bold]dj login-beatport --brave[/bold] to grab a fresh session from Brave,\n"
+                    "or [bold]dj login-beatport --ui[/bold] to log in interactively."
                 )
                 http_client.close()
                 sys.exit(1)
