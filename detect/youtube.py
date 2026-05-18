@@ -9,20 +9,44 @@ import time
 from pathlib import Path
 
 _YTDLP = [sys.executable, "-m", "yt_dlp"]
-_REMOTE = ["--remote-components", "ejs:github"]
-_COOKIES_FILE = Path.home() / "Music/dj-tools/state/yt_cookies.txt"
-_COOKIES_TTL = 7 * 24 * 3600  # refresh from Brave once a week
+_STATE_DIR = Path.home() / "Music/dj-tools/state"
+_WORKING_BROWSER_FILE = _STATE_DIR / "yt_browser.txt"
+_BROWSER_TTL = 7 * 24 * 3600
+_BROWSERS = ["brave", "chrome", "safari", "firefox"]
+_BOT_SENTINEL = "Sign in to confirm you're not a bot"
 
 
-def _cookie_args() -> list[str]:
-    """Return yt-dlp cookie flags, using a cached Netscape file when fresh."""
-    if _COOKIES_FILE.exists():
-        age = time.time() - _COOKIES_FILE.stat().st_mtime
-        if age < _COOKIES_TTL:
-            return ["--cookies", str(_COOKIES_FILE)]
-    # First run or stale cache — extract from Brave and write to file.
-    _COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    return ["--cookies-from-browser", "brave", "--cookies", str(_COOKIES_FILE)]
+def _initial_cookie_flags() -> list[str]:
+    """Return flags for the cached working browser, or the first browser in order."""
+    if _WORKING_BROWSER_FILE.exists():
+        age = time.time() - _WORKING_BROWSER_FILE.stat().st_mtime
+        if age < _BROWSER_TTL:
+            return ["--cookies-from-browser", _WORKING_BROWSER_FILE.read_text().strip()]
+    return ["--cookies-from-browser", _BROWSERS[0]]
+
+
+def _next_cookie_flags(current_flags: list[str]) -> list[str] | None:
+    """Return flags for the next browser to try after current_flags, or None if exhausted."""
+    current = current_flags[1] if len(current_flags) >= 2 else ""
+    try:
+        idx = _BROWSERS.index(current)
+    except ValueError:
+        idx = -1
+    if idx + 1 < len(_BROWSERS):
+        return ["--cookies-from-browser", _BROWSERS[idx + 1]]
+    return None
+
+
+def _save_working_browser(flags: list[str]) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _WORKING_BROWSER_FILE.write_text(flags[1])
+
+
+def _run_ytdlp(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise RuntimeError("yt-dlp not found — install it with: pip install yt-dlp")
 
 
 def resolve_video(url: str) -> tuple[str, str, int]:
@@ -30,14 +54,23 @@ def resolve_video(url: str) -> tuple[str, str, int]:
 
     Raises RuntimeError if yt-dlp is missing or the URL is unresolvable.
     """
-    cmd = [*_YTDLP, "--dump-json", "--no-playlist", *_cookie_args(), *_REMOTE, url]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        raise RuntimeError("yt-dlp not found — install it with: pip install yt-dlp")
-
-    if result.returncode != 0:
+    cookie_flags = _initial_cookie_flags()
+    while True:
+        cmd = [*_YTDLP, "--dump-json", "--no-playlist", *cookie_flags, url]
+        result = _run_ytdlp(cmd, timeout=30)
+        if result.returncode == 0:
+            _save_working_browser(cookie_flags)
+            break
         msg = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "yt-dlp failed"
+        if _BOT_SENTINEL in result.stderr:
+            next_flags = _next_cookie_flags(cookie_flags)
+            if next_flags:
+                cookie_flags = next_flags
+                continue
+            raise RuntimeError(
+                "YouTube bot detection on all browsers — sign in to YouTube in "
+                "Brave, Chrome, Safari, or Firefox and retry"
+            )
         raise RuntimeError(msg)
 
     info = json.loads(result.stdout)
@@ -53,21 +86,30 @@ def download_video(url: str, dest_dir: str) -> Path:
     Raises RuntimeError on failure.
     """
     out_template = str(Path(dest_dir) / "video.%(ext)s")
-    cmd = [
-        *_YTDLP, "--no-playlist",
-        *_cookie_args(), *_REMOTE,
-        "-f", "bestaudio/best",
-        "-x", "--audio-format", "mp3", "--audio-quality", "2",
-        "-o", out_template,
-        url,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-    except FileNotFoundError:
-        raise RuntimeError("yt-dlp not found — install it with: pip install yt-dlp")
-
-    if result.returncode != 0:
+    cookie_flags = _initial_cookie_flags()
+    while True:
+        cmd = [
+            *_YTDLP, "--no-playlist",
+            *cookie_flags,
+            "-f", "bestaudio/best",
+            "-x", "--audio-format", "mp3", "--audio-quality", "2",
+            "-o", out_template,
+            url,
+        ]
+        result = _run_ytdlp(cmd, timeout=7200)
+        if result.returncode == 0:
+            _save_working_browser(cookie_flags)
+            break
         msg = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "download failed"
+        if _BOT_SENTINEL in result.stderr:
+            next_flags = _next_cookie_flags(cookie_flags)
+            if next_flags:
+                cookie_flags = next_flags
+                continue
+            raise RuntimeError(
+                "YouTube bot detection on all browsers — sign in to YouTube in "
+                "Brave, Chrome, Safari, or Firefox and retry"
+            )
         raise RuntimeError(msg)
 
     candidate = Path(dest_dir) / "video.mp3"

@@ -143,28 +143,33 @@ def _spotify_token(client_id: str, client_secret: str) -> str:
     return resp.json()["access_token"]
 
 
-def _spotify_playlist_tracks(playlist_id: str, headers: dict, cutoff: datetime,
-                             max_pop: int, seen_ids: set, count: int,
-                             exclude: set[tuple[str, str]],
-                             max_pages: int = 4) -> list[dict]:
-    """Pull low-popularity, recently-released tracks from a Spotify playlist.
-
-    `exclude` holds (artist, title) keys already seen — prior gems and tracks
-    collected earlier this run. Skipped tracks are added to it so the same
-    track never surfaces twice across playlists.
-    """
-    results = []
-    fields = "next,items(track(id,name,popularity,artists(name),album(release_date),external_urls(spotify)))"
+def _spotify_fetch_playlist(playlist_id: str, headers: dict,
+                            seen_ids: set[str], max_pages: int = 4) -> list[dict]:
+    """Fetch raw track objects from a playlist (no filtering). One call per page."""
+    tracks: list[dict] = []
     next_url: str | None = None
-    for page in range(max_pages):
+    page = 0
+    while page < max_pages:
         if next_url:
             resp = httpx.get(next_url, headers=headers, timeout=15)
         else:
             resp = httpx.get(
                 f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
-                params={"limit": 50, "market": "US", "fields": fields},
+                params={"limit": 50, "market": "US"},
                 headers=headers, timeout=15,
             )
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "5"))
+            if retry_after > 120:
+                until = datetime.now(tz=timezone.utc) + timedelta(seconds=retry_after)
+                raise RuntimeError(
+                    f"Spotify rate-limited for {retry_after // 3600}h "
+                    f"{(retry_after % 3600) // 60}m — try again after "
+                    f"{until.strftime('%H:%M UTC')}"
+                )
+            console.print(f"[yellow]  Rate limited — waiting {retry_after + 1}s…[/yellow]")
+            time.sleep(retry_after + 1)
+            continue  # retry same page, don't advance
         if resp.status_code != 200:
             break
         data = resp.json()
@@ -174,31 +179,13 @@ def _spotify_playlist_tracks(playlist_id: str, headers: dict, cutoff: datetime,
             if not tid or tid in seen_ids:
                 continue
             seen_ids.add(tid)
-            if t.get("popularity", 100) > max_pop:
-                continue
-            release_raw = t.get("album", {}).get("release_date", "")
-            release_dt = _parse_date(release_raw)
-            if release_dt and release_dt < cutoff:
-                continue
-            artist = ", ".join(a.get("name", "") for a in t.get("artists", []))
-            title = t.get("name", "—")
-            key = _key(artist, title)
-            if key in exclude:
-                continue
-            exclude.add(key)
-            results.append({
-                "artist": artist,
-                "title": title,
-                "popularity": t.get("popularity"),
-                "release_date": _norm_date(release_raw),
-                "url": t.get("external_urls", {}).get("spotify") or "—",
-            })
-            if len(results) >= count:
-                return results
+            tracks.append(t)
         next_url = data.get("next")
+        page += 1
         if not next_url:
             break
-    return results
+        time.sleep(0.3)  # stay well under rate limit between pages
+    return tracks
 
 
 def search_spotify_gems(genre: str, count: int, max_age_days: int,
@@ -227,28 +214,58 @@ def search_spotify_gems(genre: str, count: int, max_age_days: int,
         playlists = [p for p in pl_resp.json().get("playlists", {}).get("items", []) if p]
 
     if not playlists:
+        console.print("[yellow]No Spotify playlists found for this genre.[/yellow]")
         return []
 
-    results: list[dict] = []
-    seen_ids: set[str] = set()
-    # Widen popularity threshold if needed to always return something
-    for max_pop in (15, 25, 35):
-        with console.status(
-            f"[dim]Scanning {len(playlists)} playlists "
-            f"(popularity ≤ {max_pop})…[/dim]"
-        ):
-            for pl in playlists:
-                if len(results) >= count:
-                    break
-                batch = _spotify_playlist_tracks(
-                    pl["id"], headers, cutoff, max_pop, seen_ids,
-                    count - len(results), exclude,
-                )
-                results.extend(batch)
-        if results:
-            break
+    # Limit to 5 playlists — fewer API calls, stays under rate limits.
+    playlists = playlists[:5]
+    console.print(f"[dim]Fetching tracks from {len(playlists)} playlists…[/dim]")
 
-    return results[:count]
+    # Fetch all tracks once (no repeated calls for threshold widening).
+    pool: list[dict] = []
+    seen_ids: set[str] = set()
+    for i, pl in enumerate(playlists):
+        batch = _spotify_fetch_playlist(pl["id"], headers, seen_ids)
+        pool.extend(batch)
+        if i < len(playlists) - 1:
+            time.sleep(0.5)  # stay under rate limit between playlists
+
+    console.print(f"[dim]  {len(pool)} tracks fetched[/dim]")
+    if not pool:
+        return []
+
+    # Filter in-memory: date cutoff + dedup against exclude set.
+    n_too_old = n_excluded = 0
+    candidates: list[dict] = []
+    for t in pool:
+        release_raw = t.get("album", {}).get("release_date", "")
+        release_dt = _parse_date(release_raw)
+        if release_dt and release_dt < cutoff:
+            n_too_old += 1
+            continue
+        artist = ", ".join(a.get("name", "") for a in t.get("artists", []))
+        title = t.get("name", "—")
+        key = _key(artist, title)
+        if key in exclude:
+            n_excluded += 1
+            continue
+        exclude.add(key)
+        candidates.append({
+            "artist": artist,
+            "title": title,
+            "popularity": t.get("popularity"),
+            "release_date": _norm_date(release_raw),
+            "url": t.get("external_urls", {}).get("spotify") or "—",
+        })
+
+    console.print(
+        f"[dim]  {n_too_old} too old, {n_excluded} already seen, "
+        f"{len(candidates)} candidates[/dim]"
+    )
+
+    # Return the N least-popular (most hidden) tracks.
+    candidates.sort(key=lambda x: x.get("popularity") or 100)
+    return candidates[:count]
 
 
 # ── SoundCloud ────────────────────────────────────────────────────────────────
@@ -593,9 +610,62 @@ def _render_beatport(tracks: list[dict]) -> None:
                   "filtered out; exact genre match, newest first[/dim]")
 
 
+def _track_meta(t: dict) -> str:
+    """One-line metadata summary for a track, source-agnostic."""
+    meta = []
+    if t.get("release_date"):
+        meta.append(f"released {t['release_date']}")
+    if t.get("bpm"):
+        meta.append(f"{t['bpm']} BPM")
+    if t.get("track_key") and t["track_key"] != "—":
+        meta.append(f"key {t['track_key']}")
+    if isinstance(t.get("plays"), int):
+        meta.append(f"{t['plays']} plays")
+    if isinstance(t.get("popularity"), int):
+        meta.append(f"popularity {t['popularity']}")
+    return " · ".join(meta)
+
+
+def review_gems(source: str, tracks: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Walk found tracks one at a time; user approves or rejects each.
+
+    For every track the link is printed so the user can listen, then choose:
+    approve (→ detected_tracks), reject (→ rejected_gems), skip (decide later),
+    or quit (stop reviewing the rest). Returns (approved, rejected) lists.
+    """
+    approved: list[dict] = []
+    rejected: list[dict] = []
+    total = len(tracks)
+    for i, t in enumerate(tracks, 1):
+        console.print(f"\n[bold]Track {i}/{total}[/bold]  "
+                      f"[cyan]{t.get('artist') or '—'}[/cyan] — "
+                      f"{t.get('title') or '—'}")
+        meta = _track_meta(t)
+        if meta:
+            console.print(f"  [dim]{meta}[/dim]")
+        console.print("  ", end="")
+        console.print(_clean_url(t.get("url") or "—"), style="blue", highlight=False)
+        choice = Prompt.ask(
+            "  [green]a[/green]pprove / [red]r[/red]eject / [dim]s[/dim]kip / [dim]q[/dim]uit",
+            choices=["a", "r", "s", "q"], default="s", show_choices=False,
+        ).lower()
+        if choice == "a":
+            approved.append(t)
+            console.print("  [green]✓ approved[/green]")
+        elif choice == "r":
+            rejected.append(t)
+            console.print("  [red]✗ rejected[/red]")
+        elif choice == "q":
+            console.print("  [dim]stopping review — remaining tracks left undecided[/dim]")
+            break
+        else:
+            console.print("  [dim]↪ skipped[/dim]")
+    return approved, rejected
+
+
 def _persist(source: str, genre: str, count: int, max_age_days: int,
              tracks: list[dict]) -> int:
-    """Save a gems run: one sessions row + gem_scans row + detected/gem tracks.
+    """Save approved gems: one sessions row + gem_scans row + detected/gem tracks.
 
     Returns the session id. Detected tracks are deduped globally by
     (artist, title) inside `insert_track`, so re-inserts are harmless.
@@ -656,10 +726,12 @@ def run_gems(
         f"released in last {max_age_days}d\n"
     )
 
-    # Build the exclude set: prior gems on this platform that could still
-    # surface in a search bounded by the current cutoff (older ones "fade").
+    # Build the exclude set: prior gems + rejected gems on this platform that
+    # could still surface in a search bounded by the current cutoff (older ones
+    # "fade"). Approved gems shouldn't re-surface; neither should rejections.
     cutoff_str = _cutoff(max_age_days).strftime("%Y-%m-%d")
     exclude = detect_db.seen_gem_keys(source, cutoff_str)
+    exclude |= detect_db.seen_rejected_gem_keys(source, cutoff_str)
     skipped = len(exclude)
 
     if source == "spotify":
@@ -686,9 +758,38 @@ def run_gems(
         renderer(tracks)
         console.print(f"\n[dim]--no-save: {len(tracks)} track(s) shown, not persisted[/dim]")
     else:
-        session_id = _persist(source, genre, count, max_age_days, tracks)
-        renderer(tracks)
-        console.print(f"\n[dim]Saved {len(tracks)} track(s) to DB (session #{session_id})[/dim]")
+        # Diff/review flow: each track is decided individually. Approved tracks
+        # go to detected_tracks; rejected ones to rejected_gems (won't recur).
+        console.print(
+            f"\n[bold]Review {len(tracks)} track(s)[/bold] — "
+            "open each link, listen, then approve or reject.\n"
+        )
+        approved, rejected = review_gems(source, tracks)
+
+        for t in rejected:
+            detect_db.insert_rejected_gem(
+                source, t.get("artist") or "", t.get("title") or "",
+                url=t.get("url"), release_date=t.get("release_date"),
+            )
+
+        if approved:
+            session_id = _persist(source, genre, count, max_age_days, approved)
+            console.print(
+                f"\n[green]✓ {len(approved)} approved[/green] → detected_tracks "
+                f"(session #{session_id})"
+            )
+        else:
+            console.print("\n[dim]Nothing approved — detected_tracks unchanged.[/dim]")
+        if rejected:
+            console.print(
+                f"[dim]✗ {len(rejected)} rejected → rejected_gems "
+                "(won't resurface in future scans)[/dim]"
+            )
+        undecided = len(tracks) - len(approved) - len(rejected)
+        if undecided:
+            console.print(
+                f"[dim]↪ {undecided} skipped/undecided — may reappear in a future scan[/dim]"
+            )
     if len(tracks) < count:
         note = f"Only {len(tracks)} of {count} requested found"
         if skipped:

@@ -49,12 +49,10 @@ def _get_token() -> str:
     """Get a Beatport Bearer token.
 
     Priority:
-    1. BEATPORT_ACCESS_TOKEN env var
-    2. BEATPORT_SESSION_TOKEN cookie → refresh via /api/auth/session (fallback)
-    3. BEATPORT_USERNAME + BEATPORT_PASSWORD → browser login (last resort)
+    1. BEATPORT_ACCESS_TOKEN env var (valid JWT)
+    2. BEATPORT_SESSION_TOKEN cookie → refresh via /api/auth/session
     """
     import time as _time
-    session_cookie = os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
 
     access_token = os.environ.get("BEATPORT_ACCESS_TOKEN", "").strip()
     if access_token:
@@ -63,46 +61,42 @@ def _get_token() -> str:
         payload = bp_api._jwt_payload(access_token)
         if payload.get("exp", 0) > _time.time():
             return access_token
-        # expired — fall through to refresh
 
+    session_cookie = os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
     if session_cookie:
         new_token = bp_api.refresh_via_session(session_cookie)
         if new_token:
             bp_api.save_token_to_env(new_token)
             return new_token
 
-    username = os.environ.get("BEATPORT_USERNAME", "").strip()
-    password = os.environ.get("BEATPORT_PASSWORD", "").strip() or None
-
-    console.print("[dim]Session expired — trying browser login (headless)…[/dim]")
-    try:
-        token, session = bp_api.capture_token(username or None, password, headless=True)
-        bp_api.save_token_to_env(token, session)
-        return token
-    except Exception:
-        pass
-
-    console.print("[dim]Headless login failed — opening browser window…[/dim]")
-    try:
-        token, session = bp_api.capture_token(username or None, password, headless=False)
-        bp_api.save_token_to_env(token, session)
-        return token
-    except Exception:
-        pass
-
     console.print(
-        "[red]Session expired and browser login failed.[/red]\n"
-        "Run [bold]dj login-beatport --ui[/bold] to log in interactively."
+        "[red]Beatport token expired and session refresh failed.[/red]\n"
+        "Run [bold]dj login-beatport --brave[/bold] to grab a fresh session from Brave.\n"
+        "Or [bold]dj login-beatport --ui[/bold] to log in interactively."
     )
     sys.exit(1)
 
 
 def _try_refresh() -> Optional[str]:
-    """Try to refresh the access token via the NextAuth session cookie."""
+    """Try to refresh the access token via the NextAuth session cookie.
+
+    Matches the --cookie login flow: reads session from os.environ with a
+    fallback to the .env file directly (so callers that didn't call
+    load_dotenv still work), then saves the refreshed token back to .env.
+    """
     session_cookie = os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
     if not session_cookie:
+        try:
+            from dotenv import dotenv_values
+            session_cookie = dotenv_values(".env").get("BEATPORT_SESSION_TOKEN", "").strip()
+        except Exception:
+            pass
+    if not session_cookie:
         return None
-    return bp_api.refresh_via_session(session_cookie)
+    new_token = bp_api.refresh_via_session(session_cookie)
+    if new_token:
+        bp_api.save_token_to_env(new_token)
+    return new_token
 
 
 def _bp_meta(match: dict) -> dict:
@@ -160,22 +154,19 @@ def run_enrich(
 
     def on_401() -> None:
         nonlocal token
-        new_token = _try_refresh()
-        if new_token:
-            console.print("[dim]Token refreshed.[/dim]")
-            token = new_token
-            http_client.headers["authorization"] = token
-            bp_api.save_token_to_env(token)
-        else:
-            raise bp_api.AuthExpiredError(
-                "Beatport token expired and session refresh failed.\n"
-                "The session cookie's refresh token has been rotated — get fresh tokens:\n"
-                "  1. Open beatport.com (logged in)\n"
-                "  2. DevTools → Network → /api/auth/session → copy token.accessToken\n"
-                "     → set as BEATPORT_ACCESS_TOKEN in .env\n"
-                "  3. DevTools → Application → Cookies → copy __Secure-next-auth.session-token\n"
-                "     → set as BEATPORT_SESSION_TOKEN in .env"
-            )
+        import time as _t
+        for attempt in range(1, 3):
+            new_token = _try_refresh()
+            if new_token:
+                console.print("[dim]Token refreshed.[/dim]")
+                token = new_token
+                http_client.headers["authorization"] = token
+                bp_api.save_token_to_env(token)
+                return
+            if attempt < 2:
+                console.print(f"[dim]Session refresh failed (attempt {attempt}/2) — retrying in 3s…[/dim]")
+                _t.sleep(3)
+        raise bp_api.AuthExpiredError("session refresh failed after 2 attempts")
 
     beatport = bp_api.Beatport(client=http_client, on_401=on_401)
 
@@ -244,16 +235,12 @@ def run_enrich(
             query = f"{artist_query} {search_query(title)}"
             try:
                 results = beatport.search_tracks(query, per_page=10, debug=verbose)
-            except bp_api.AuthExpiredError as e:
+            except bp_api.AuthExpiredError:
                 progress.stop()
-                console.print(f"\n[red]Auth failed:[/red] {e}")
                 console.print(
-                    "Get fresh tokens:\n"
-                    "  1. Open beatport.com in a browser (logged in)\n"
-                    "  2. DevTools → Network → /api/auth/session → copy [bold]token.accessToken[/bold]\n"
-                    "     → set as BEATPORT_ACCESS_TOKEN in .env\n"
-                    "  3. DevTools → Application → Cookies → copy [bold]__Secure-next-auth.session-token[/bold]\n"
-                    "     → set as BEATPORT_SESSION_TOKEN in .env"
+                    "\n[red]Auth failed:[/red] Beatport session refresh failed after retrying.\n"
+                    "Run [bold]dj login-beatport --brave[/bold] to grab a fresh session from Brave,\n"
+                    "or [bold]dj login-beatport --ui[/bold] to log in interactively."
                 )
                 http_client.close()
                 sys.exit(1)

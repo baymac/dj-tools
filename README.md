@@ -105,6 +105,8 @@ dj
 │   │
 │   ├── history / sessions / *-history                 Inspect detection state
 │   ├── *-delete-session <id>                          Remove a scan session
+│   ├── fix-session <id>                               Correct detected tracks using a confirmed tracklist (stdin)
+│   │                                                  [--threshold F] [--apply]
 │   ├── login-instagram / login-mixcloud               Save credentials
 │   │
 │   ├── enrich                                         Stage 3: detected → Beatport metadata
@@ -202,6 +204,7 @@ uv run dj_cli.py detect topdjmixes https://www.topdjmixes.com/some-mix-page/
     - **Single track ≤15 min** → save the track's metadata as one row (no Shazam scan).
     - **Single track >15 min** (radio episodes, DJ mixes) → Shazam-by-chunks audio scan.
     - **Personalized `/discover/` URLs** (e.g. `personalized-tracks::<user>:<id>`) → require user-bound OAuth (run `dj detect login-soundcloud` once; opens browser, OAuth dance, saves a refresh token). After login the handler auto-uses the user token for all calls; without it `/discover/` URLs return a clear "login required" message. Make sure your SoundCloud app has `http://localhost:8080/callback` (or your custom `SOUNDCLOUD_REDIRECT_URI`) in its Redirect URI list.
+- YouTube: no credentials needed. yt-dlp extracts cookies from the first available browser (Brave → Chrome → Safari → Firefox) and caches them for one week. If YouTube returns a bot-detection challenge, the cache is discarded and cookies are re-extracted before retrying. If no browser is available the fallback passes `--cookies-from-browser chrome` live.
 - Reddit: none. Public JSON API. Works on any subreddit text post whose body contains `Artist - Title` lines (markdown links and `[brackets]` are stripped).
 - topdjmixes: none. Paste-into-vi flow (same parser shape as Reddit). Works on any tracklist with `01. Artist – Title` lines — leading position numbers and `[label]` brackets are stripped.
 
@@ -241,11 +244,28 @@ uv run dj_cli.py detect reddit-delete-session <id>
 uv run dj_cli.py detect topdjmixes-delete-session <id>
 ```
 
+### Correcting a session's detected tracks — `fix-session`
+
+Shazam occasionally mis-identifies tracks. `fix-session` lets you paste a confirmed tracklist (from a set description, the DJ's own post, etc.) and remove any detected track that can't be matched to it.
+
+```bash
+# Dry-run — shows what would be removed (default):
+uv run dj_cli.py detect fix-session 7
+
+# Apply the removals:
+uv run dj_cli.py detect fix-session 7 --apply
+
+# Lower the match bar (default 0.75):
+uv run dj_cli.py detect fix-session 7 --apply --threshold 0.6
+```
+
+Paste the confirmed tracklist into stdin (press Ctrl-D when done). Lines that match a detected track above `--threshold` are kept; the rest are removed from the session and deleted from `detected_tracks` if they haven't been enriched and aren't shared with another session. `--apply` is required to actually delete — without it the command prints the diff and exits.
+
 ---
 
 # Discover hidden gems — `detect gems`
 
-`detect gems` surfaces low-play / under-the-radar tracks in a genre, released within a chosen time window, across four platforms. Like Stage 2 it writes finds into `detected_tracks`, so gems flow straight into `detect enrich` and the rest of the pipeline.
+`detect gems` surfaces low-play / under-the-radar tracks in a genre, released within a chosen time window, across four platforms. It does **not** save finds automatically — instead it opens an interactive review where you listen to each track and decide. Approved tracks land in `detected_tracks` and flow straight into `detect enrich` and the rest of the pipeline.
 
 Run it fully interactive (prompts for every choice) or pass flags — any omitted flag is prompted for:
 
@@ -253,7 +273,7 @@ Run it fully interactive (prompts for every choice) or pass flags — any omitte
 uv run dj_cli.py detect gems                                                          # fully interactive
 uv run dj_cli.py detect gems --source beatport --genre "Tech House" --count 10 --date 1mo
 uv run dj_cli.py detect gems --source soundcloud --count 15 --date 6mo
-uv run dj_cli.py detect gems --source bandcamp --count 5 --date 6mo --no-save          # show only, don't persist
+uv run dj_cli.py detect gems --source bandcamp --count 5 --date 6mo --no-save          # show only, skip review
 ```
 
 | Flag | Values | Description |
@@ -262,7 +282,7 @@ uv run dj_cli.py detect gems --source bandcamp --count 5 --date 6mo --no-save   
 | `--genre` | `Tech House` | Genre (only Tech House is mapped today) |
 | `--count` / `-n` | 1–20 | Number of **new** tracks to return |
 | `--date` | `1mo` / `6mo` / `1yr` / `3yr` | Max track age (release window) |
-| `--no-save` | — | Show results but don't persist to the DB (testing) |
+| `--no-save` | — | Show the results table and skip the review step entirely (testing) |
 
 **Per-source "gem" signal** — each platform exposes different data, so the genre filter and the low-play proxy differ:
 
@@ -275,7 +295,14 @@ uv run dj_cli.py detect gems --source bandcamp --count 5 --date 6mo --no-save   
 
 For strict genre accuracy, prefer **Beatport** — it is the only source with an authoritative genre taxonomy. Bandcamp tags in particular are uploader-supplied and noisy.
 
-**Persistence and cross-run dedup.** Each saved run records a `sessions` row (`type='gems'`) plus a `gem_scans` row (source, genre, requested/found counts, date window) and one `gem_tracks` row per track (url, release date, plays/popularity). Found tracks land in `detected_tracks` through the normal dedup path. The **next** run on the same platform skips every track it already found and keeps paging until it has `--count` genuinely-new tracks — there is no fixed page offset, so it works even as a platform's results reshuffle over time. Prior gems whose release date is older than the current `--date` window are "faded" out of the comparison set (they cannot recur in a narrower window anyway), keeping the dedup check cheap. `--no-save` skips all persistence — results display but nothing is written, and the dedup history is left untouched.
+**Review.** After a scan, gems are not saved — `detect gems` walks the finds one at a time, printing each track's link so you can open it and listen, then prompts for a decision:
+
+- **approve** (`a`) — the track is saved to `detected_tracks` and enters the pipeline.
+- **reject** (`r`) — the track is recorded in `rejected_gems` and never enters the pipeline; it won't surface again in future scans.
+- **skip** (`s`, the default) — the track is left undecided and not persisted anywhere, so it can reappear in a later scan.
+- **quit** (`q`) — stop reviewing; the remaining tracks are left undecided.
+
+**Persistence and cross-run dedup.** Approving at least one track records a `sessions` row (`type='gems'`) plus a `gem_scans` row (source, genre, requested/found counts, date window) and one `gem_tracks` row per approved track (url, release date, plays/popularity); approved tracks land in `detected_tracks` through the normal dedup path. Rejected tracks go to `rejected_gems` instead. The **next** run on the same platform skips every track it already approved *or* rejected and keeps paging until it has `--count` genuinely-new tracks — there is no fixed page offset, so it works even as a platform's results reshuffle over time. Prior gems (approved or rejected) whose release date is older than the current `--date` window are "faded" out of the comparison set (they cannot recur in a narrower window anyway), keeping the dedup check cheap. `--no-save` skips review and all persistence — results display but nothing is written, and the dedup history is left untouched.
 
 **Credentials:**
 - Spotify: `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` in `.env` (create an app at https://developer.spotify.com/dashboard). Prompted for interactively if missing.
@@ -571,6 +598,7 @@ All tables live in `~/Music/dj-tools/dj.db`.
 | `track_sessions` | Stage 2 (`detect`) | Junction: maps each track to the session(s) it appeared in, with timestamp position. |
 | `gem_scans` | `detect gems` | One row per gems run: source, genre, requested/found counts, date window, linked `sessions` row. |
 | `gem_tracks` | `detect gems` | Per-track gems metadata (url, release_date, plays, popularity) linking a `detected_tracks` row to a `gem_scans` row. Indexed on `(source, release_date)` for the cross-run dedup "fade" query. |
+| `rejected_gems` | `detect gems` | Tracks the user rejected during gem review (source, artist, title, url, release_date). Excluded from future scans on that source. Indexed on `(source, release_date)` for the cross-run dedup "fade" query. |
 | `enriched_tracks` | Stage 3 (`detect enrich`), Stage 4 (`detect sync-beatport`) | All Beatport-derived data on one row: id, detected_track_id, beatport_id, beatport_link, bpm, key, genre, release_date, artist, title, apple_music_url, enriched_at, plus the catalog-detail extras (mix_name, label, catalog_number, isrc, sub_genre, length_ms). |
 | `enriched_tracks_analysis` | Stage 5 (`detect studio-analyse`) creates rows; Stage 6a/6b update them | Sparse — only tracks that have been through `studio-analyse`. Keyed on `beatport_id` (PK). Carries the DJ Studio analysis fields (mik_key, mik_nrg, mik_key_secondary, mik_key_confidence, tempo_precise, duration_sec, cue_points_count, vocals/drums/bass/melody {avg,peak}, analysis_json with full energy segments + 1Hz stem curves + per-segment stem RMS), rekordbox round-trip (rk_analysis_json), and per-stage timestamps (dj_studio_at, rekordbox_export_at, rekordbox_analysis_at). JOIN with `enriched_tracks` for the basic+catalog fields. |
 | `enrich_runs` | Stage 3 (`detect enrich`) | Per-run summary: seen / found / not_found / fuzzy_miss / status. |

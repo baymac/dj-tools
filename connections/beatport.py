@@ -296,6 +296,24 @@ def capture_session_via_cdp(cdp_url: Optional[str] = None) -> str:
 
 
 
+def capture_session_from_brave() -> str:
+    """Read the Beatport session cookie directly from Brave's local store.
+
+    Works while Brave is running (opens the SQLite cookie DB read-only/immutable).
+    Raises RuntimeError if Brave isn't installed, you're not logged into Beatport,
+    or the macOS Keychain decryption fails.
+    """
+    from connections.brave_cookies import read_cookies_for_domain
+    cookies = read_cookies_for_domain("beatport.com")
+    for c in cookies:
+        if c["name"] == _BEATPORT_SESSION_COOKIE_NAME:
+            return c["value"]
+    raise RuntimeError(
+        f"Cookie '{_BEATPORT_SESSION_COOKIE_NAME}' not found in Brave's Beatport store. "
+        "Make sure you're logged into beatport.com in Brave."
+    )
+
+
 def capture_token(username: Optional[str] = None, password: Optional[str] = None, headless: bool = True) -> tuple[str, str]:
     """Browser login → (access_token, session_cookie).
 

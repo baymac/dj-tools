@@ -21,6 +21,7 @@ def _radio_args(**kwargs):
         capture=10,
         duration=0,
         cooldown=5,
+        dry_run=False,
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)

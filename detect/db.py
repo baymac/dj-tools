@@ -88,6 +88,19 @@ def migrate() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_gem_tracks_fade ON gem_tracks(source, release_date);
 
+            CREATE TABLE IF NOT EXISTS rejected_gems (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                source       TEXT NOT NULL,
+                artist       TEXT,
+                title        TEXT,
+                url          TEXT,
+                release_date TEXT,
+                rejected_at  TEXT NOT NULL,
+                UNIQUE(source, artist, title)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rejected_gems_fade ON rejected_gems(source, release_date);
+
             CREATE TABLE IF NOT EXISTS enriched_tracks (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 detected_track_id INTEGER UNIQUE REFERENCES detected_tracks(id) ON DELETE CASCADE,
@@ -347,6 +360,42 @@ def seen_gem_keys(source: str, cutoff_date: str) -> set[tuple[str, str]]:
     }
 
 
+def insert_rejected_gem(
+    source: str,
+    artist: str,
+    title: str,
+    url: str | None = None,
+    release_date: str | None = None,
+) -> None:
+    """Record a gem the user rejected during review so it won't resurface."""
+    with _connect() as con:
+        con.execute(
+            """INSERT OR IGNORE INTO rejected_gems
+               (source, artist, title, url, release_date, rejected_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (source, artist, title, url, release_date, _now()),
+        )
+
+
+def seen_rejected_gem_keys(source: str, cutoff_date: str) -> set[tuple[str, str]]:
+    """Return (artist, title) keys of rejected gems on `source` that could recur.
+
+    Same fade rule as `seen_gem_keys`: rejections of tracks released before
+    `cutoff_date` can't reappear in a search bounded by that cutoff.
+    """
+    with _connect() as con:
+        rows = con.execute(
+            """SELECT artist, title FROM rejected_gems
+               WHERE source = ?
+                 AND (release_date IS NULL OR release_date >= ?)""",
+            (source, cutoff_date),
+        ).fetchall()
+    return {
+        ((r["artist"] or "").strip().lower(), (r["title"] or "").strip().lower())
+        for r in rows
+    }
+
+
 def upsert_shazam_slice(
     session_id: int,
     position: int,
@@ -411,6 +460,49 @@ def delete_session(session_id: int) -> int:
         con.execute("DELETE FROM track_sessions WHERE session_id = ?", (session_id,))
         con.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return n
+
+
+def remove_tracks_from_session(session_id: int, track_ids: list[int]) -> list[int]:
+    """Unlink specific tracks from a session and delete them if they have no other home.
+
+    A track is deleted from detected_tracks if:
+    - it belongs only to this session (no other track_sessions row)
+    - it hasn't been enriched (no enriched_tracks row)
+    - its source is not 'beatport'
+
+    Returns the list of track_ids that were actually deleted from detected_tracks.
+    """
+    if not track_ids:
+        return []
+    placeholders = ",".join("?" * len(track_ids))
+    deleted = []
+    with _connect() as con:
+        # Find which of the requested track_ids can be fully deleted
+        rows = con.execute(
+            f"""SELECT id FROM detected_tracks
+                WHERE id IN ({placeholders})
+                  AND id NOT IN (
+                      SELECT track_id FROM track_sessions
+                      WHERE session_id != ? AND track_id IN ({placeholders})
+                  )
+                  AND id NOT IN (
+                      SELECT detected_track_id FROM enriched_tracks
+                      WHERE detected_track_id IS NOT NULL
+                        AND detected_track_id IN ({placeholders})
+                  )
+                  AND source != 'beatport'""",
+            (*track_ids, session_id, *track_ids, *track_ids),
+        ).fetchall()
+        deletable = {r["id"] for r in rows}
+        for tid in track_ids:
+            con.execute(
+                "DELETE FROM track_sessions WHERE track_id = ? AND session_id = ?",
+                (tid, session_id),
+            )
+            if tid in deletable:
+                con.execute("DELETE FROM detected_tracks WHERE id = ?", (tid,))
+                deleted.append(tid)
+    return deleted
 
 
 def list_sessions(type_: str, limit: int = 20) -> list[sqlite3.Row]:
@@ -619,14 +711,48 @@ def upsert_enriched(detected_track_id: int, meta: dict, extras: dict | None = No
         beatport_id = meta.get("beatport_id")
         if beatport_id:
             existing = con.execute(
-                "SELECT id FROM enriched_tracks WHERE beatport_id = ? AND detected_track_id != ?",
+                # IS NOT handles NULL correctly: NULL IS NOT <int> is TRUE
+                "SELECT id, detected_track_id FROM enriched_tracks WHERE beatport_id = ? AND detected_track_id IS NOT ?",
                 (beatport_id, detected_track_id),
             ).fetchone()
             if existing:
-                con.execute(
-                    "UPDATE detected_tracks SET enrich_outcome = 'duplicate' WHERE id = ?",
-                    (detected_track_id,),
-                )
+                if existing["detected_track_id"] is None:
+                    # Row was inserted by sync-beatport (no detection link yet).
+                    # Claim it: link this detected track and backfill any extras.
+                    dt_row = con.execute(
+                        "SELECT apple_music_url FROM detected_tracks WHERE id = ?",
+                        (detected_track_id,),
+                    ).fetchone()
+                    apple_url_claim = dt_row["apple_music_url"] if dt_row else None
+                    con.execute(
+                        """UPDATE enriched_tracks SET
+                             detected_track_id = ?,
+                             apple_music_url   = COALESCE(apple_music_url, ?),
+                             mix_name          = COALESCE(mix_name, ?),
+                             label             = COALESCE(label, ?),
+                             catalog_number    = COALESCE(catalog_number, ?),
+                             isrc              = COALESCE(isrc, ?),
+                             sub_genre         = COALESCE(sub_genre, ?),
+                             length_ms         = COALESCE(length_ms, ?)
+                           WHERE id = ?""",
+                        (
+                            detected_track_id,
+                            apple_url_claim,
+                            extras.get("mix_name"),
+                            extras.get("label"),
+                            extras.get("catalog_number"),
+                            extras.get("isrc"),
+                            extras.get("sub_genre"),
+                            extras.get("length_ms"),
+                            existing["id"],
+                        ),
+                    )
+                else:
+                    # A different detected track already claimed this beatport_id.
+                    con.execute(
+                        "UPDATE detected_tracks SET enrich_outcome = 'duplicate' WHERE id = ?",
+                        (detected_track_id,),
+                    )
                 return
 
         row = con.execute(
