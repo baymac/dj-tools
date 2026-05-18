@@ -711,14 +711,48 @@ def upsert_enriched(detected_track_id: int, meta: dict, extras: dict | None = No
         beatport_id = meta.get("beatport_id")
         if beatport_id:
             existing = con.execute(
-                "SELECT id FROM enriched_tracks WHERE beatport_id = ? AND detected_track_id != ?",
+                # IS NOT handles NULL correctly: NULL IS NOT <int> is TRUE
+                "SELECT id, detected_track_id FROM enriched_tracks WHERE beatport_id = ? AND detected_track_id IS NOT ?",
                 (beatport_id, detected_track_id),
             ).fetchone()
             if existing:
-                con.execute(
-                    "UPDATE detected_tracks SET enrich_outcome = 'duplicate' WHERE id = ?",
-                    (detected_track_id,),
-                )
+                if existing["detected_track_id"] is None:
+                    # Row was inserted by sync-beatport (no detection link yet).
+                    # Claim it: link this detected track and backfill any extras.
+                    dt_row = con.execute(
+                        "SELECT apple_music_url FROM detected_tracks WHERE id = ?",
+                        (detected_track_id,),
+                    ).fetchone()
+                    apple_url_claim = dt_row["apple_music_url"] if dt_row else None
+                    con.execute(
+                        """UPDATE enriched_tracks SET
+                             detected_track_id = ?,
+                             apple_music_url   = COALESCE(apple_music_url, ?),
+                             mix_name          = COALESCE(mix_name, ?),
+                             label             = COALESCE(label, ?),
+                             catalog_number    = COALESCE(catalog_number, ?),
+                             isrc              = COALESCE(isrc, ?),
+                             sub_genre         = COALESCE(sub_genre, ?),
+                             length_ms         = COALESCE(length_ms, ?)
+                           WHERE id = ?""",
+                        (
+                            detected_track_id,
+                            apple_url_claim,
+                            extras.get("mix_name"),
+                            extras.get("label"),
+                            extras.get("catalog_number"),
+                            extras.get("isrc"),
+                            extras.get("sub_genre"),
+                            extras.get("length_ms"),
+                            existing["id"],
+                        ),
+                    )
+                else:
+                    # A different detected track already claimed this beatport_id.
+                    con.execute(
+                        "UPDATE detected_tracks SET enrich_outcome = 'duplicate' WHERE id = ?",
+                        (detected_track_id,),
+                    )
                 return
 
         row = con.execute(

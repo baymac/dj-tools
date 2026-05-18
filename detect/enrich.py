@@ -49,12 +49,10 @@ def _get_token() -> str:
     """Get a Beatport Bearer token.
 
     Priority:
-    1. BEATPORT_ACCESS_TOKEN env var
-    2. BEATPORT_SESSION_TOKEN cookie → refresh via /api/auth/session (fallback)
-    3. BEATPORT_USERNAME + BEATPORT_PASSWORD → browser login (last resort)
+    1. BEATPORT_ACCESS_TOKEN env var (valid JWT)
+    2. BEATPORT_SESSION_TOKEN cookie → refresh via /api/auth/session
     """
     import time as _time
-    session_cookie = os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
 
     access_token = os.environ.get("BEATPORT_ACCESS_TOKEN", "").strip()
     if access_token:
@@ -63,36 +61,18 @@ def _get_token() -> str:
         payload = bp_api._jwt_payload(access_token)
         if payload.get("exp", 0) > _time.time():
             return access_token
-        # expired — fall through to refresh
 
+    session_cookie = os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
     if session_cookie:
         new_token = bp_api.refresh_via_session(session_cookie)
         if new_token:
             bp_api.save_token_to_env(new_token)
             return new_token
 
-    username = os.environ.get("BEATPORT_USERNAME", "").strip()
-    password = os.environ.get("BEATPORT_PASSWORD", "").strip() or None
-
-    console.print("[dim]Session expired — trying browser login (headless)…[/dim]")
-    try:
-        token, session = bp_api.capture_token(username or None, password, headless=True)
-        bp_api.save_token_to_env(token, session)
-        return token
-    except Exception:
-        pass
-
-    console.print("[dim]Headless login failed — opening browser window…[/dim]")
-    try:
-        token, session = bp_api.capture_token(username or None, password, headless=False)
-        bp_api.save_token_to_env(token, session)
-        return token
-    except Exception:
-        pass
-
     console.print(
-        "[red]Session expired and browser login failed.[/red]\n"
-        "Run [bold]dj login-beatport --ui[/bold] to log in interactively."
+        "[red]Beatport token expired and session refresh failed.[/red]\n"
+        "Run [bold]dj login-beatport --brave[/bold] to grab a fresh session from Brave.\n"
+        "Or [bold]dj login-beatport --ui[/bold] to log in interactively."
     )
     sys.exit(1)
 

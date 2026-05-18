@@ -62,6 +62,8 @@ Examples:
                       help="Attach to running Brave via CDP (port 9222) and run the auth call from "
                            "inside Brave itself — bypasses every Cloudflare fingerprint check. "
                            "Requires Brave launched with --remote-debugging-port=9222.")
+    mode.add_argument("--brave", action="store_true",
+                      help="Read session cookie from Brave's local store (no browser window needed)")
 
     return parser, detect_p, sync_p, playlist_p, lb_p
 
@@ -77,7 +79,7 @@ def _handle_login_beatport(args) -> None:
         extra = " + session cookie" if session else ""
         console.print(f"[green]Token{extra} saved to .env[/green] — expires in ~10 min, session cookie will auto-refresh.")
 
-    if not args.ui and not args.cookie:
+    if not args.ui and not args.cookie and not getattr(args, "brave", False):
         import os, time as _t
         current = os.environ.get("BEATPORT_ACCESS_TOKEN", "").strip()
         if current:
@@ -85,8 +87,21 @@ def _handle_login_beatport(args) -> None:
                 current = f"Bearer {current}"
             remaining = int(bp_api._jwt_payload(current).get("exp", 0) - _t.time())
             if remaining > 0:
-                console.print(f"[green]Token still valid[/green] — expires in {remaining}s. Use --cookie or --ui to force refresh.")
+                console.print(f"[green]Token still valid[/green] — expires in {remaining}s. Use --brave, --cookie, or --ui to force refresh.")
                 return
+
+    if getattr(args, "brave", False):
+        try:
+            session_cookie = bp_api.capture_session_from_brave()
+        except RuntimeError as e:
+            console.print(f"[red]Brave cookie read failed:[/red] {e}")
+            sys.exit(1)
+        token = bp_api.refresh_via_session(session_cookie)
+        if not token:
+            console.print("[red]Session cookie refresh failed — try logging into Beatport in Brave first.[/red]")
+            sys.exit(1)
+        _save_and_report(token, session_cookie)
+        return
 
     if args.cookie:
         session_cookie = __import__("os").environ.get("BEATPORT_SESSION_TOKEN", "").strip()
@@ -110,28 +125,45 @@ def _handle_login_beatport(args) -> None:
         _save_and_report(token)
         return
 
-    if args.ui or not args.cookie:
+    if args.ui:
+        console.print("[dim]Opening visible browser to grab Beatport session…[/dim]")
         import os as _os
         username = _os.environ.get("BEATPORT_USERNAME", "").strip() or None
         password = _os.environ.get("BEATPORT_PASSWORD", "").strip() or None
-
-        if not args.ui:
-            session_cookie = _os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
-            if session_cookie:
-                token = bp_api.refresh_via_session(session_cookie)
-                if token:
-                    _save_and_report(token)
-                    return
-                console.print("[yellow]Session cookie refresh failed — falling back to browser login…[/yellow]")
-
-        headless = not args.ui
-        console.print(f"[dim]Opening {'visible' if not headless else 'headless'} browser to grab Beatport session…[/dim]")
         try:
-            token, session = bp_api.capture_token(username, password, headless=headless)
+            token, session = bp_api.capture_token(username, password, headless=False)
         except RuntimeError as e:
             console.print(f"[red]Login failed:[/red] {e}")
             sys.exit(1)
         _save_and_report(token, session)
+        return
+
+    # No flag — auto mode: try session cookie, then Brave store
+    import os as _os
+    session_cookie = _os.environ.get("BEATPORT_SESSION_TOKEN", "").strip()
+    if session_cookie:
+        token = bp_api.refresh_via_session(session_cookie)
+        if token:
+            _save_and_report(token)
+            return
+        console.print("[yellow]Session cookie refresh failed — trying Brave cookie store…[/yellow]")
+
+    try:
+        session_cookie = bp_api.capture_session_from_brave()
+        token = bp_api.refresh_via_session(session_cookie)
+        if token:
+            _save_and_report(token, session_cookie)
+            return
+        console.print("[red]Brave cookie found but refresh failed — it may be stale.[/red]")
+    except RuntimeError:
+        pass
+
+    console.print(
+        "[red]Could not get a valid Beatport token.[/red]\n"
+        "Log into beatport.com in Brave, then run [bold]dj login-beatport[/bold] again.\n"
+        "Or use [bold]dj login-beatport --ui[/bold] to log in with a browser window."
+    )
+    sys.exit(1)
 
 
 def main() -> None:
